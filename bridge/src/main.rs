@@ -10,6 +10,12 @@ use config::Config;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
+fn install_crypto_provider() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls ring crypto provider");
+}
+
 #[derive(Parser)]
 #[command(name = "imsg-bridge", about = "Mac-side iMessage bridge for Omarchy")]
 struct Cli {
@@ -42,6 +48,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    install_crypto_provider();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("imsg_bridge=info".parse()?))
         .init();

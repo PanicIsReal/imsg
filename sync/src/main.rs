@@ -7,6 +7,12 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+fn install_crypto_provider() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls ring crypto provider");
+}
+
 #[derive(Parser)]
 #[command(name = "imsg-sync", about = "Linux iMessage sync daemon for Omarchy")]
 struct Cli {
@@ -30,6 +36,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    install_crypto_provider();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("imsg_sync=info".parse()?))
         .init();
