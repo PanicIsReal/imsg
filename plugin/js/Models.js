@@ -49,9 +49,15 @@ function formatTime(iso) {
   return Qt.formatDate(d, "MMM d, yyyy")
 }
 
+function messageText(msg) {
+  var text = String((msg && msg.text) || "").replace(/\uFFFC/g, "").trim()
+  if (text.length > 0) return text
+  if (msg && msg.attachments && msg.attachments.length > 0) return "Attachment"
+  return ""
+}
+
 function messagePreview(msg) {
-  if (!msg) return ""
-  var text = msg.text || ""
+  var text = messageText(msg)
   if (text.length > 80) return text.substring(0, 77) + "..."
   return text
 }

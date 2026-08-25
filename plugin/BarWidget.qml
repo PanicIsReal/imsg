@@ -12,8 +12,9 @@ BarWidget {
   readonly property bool opened: panelLoader.item
     ? panelLoader.item.opened === true
     : false
-  readonly property bool cacheReady: imsg && imsg.chats && imsg.chats.length > 0
-  readonly property bool live: imsg && imsg.bridgeConnected && imsg.databaseReady
+  readonly property bool cacheReady: imsg && imsg.cacheReady
+  readonly property string linkState: imsg ? imsg.linkState : "waiting"
+  readonly property bool live: linkState === "live"
 
   function open() {
     if (panelLoader.item) panelLoader.item.open()
@@ -90,14 +91,18 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
+    dimmed: root.linkState === "mac-down" || root.linkState === "sync-down" || root.linkState === "mac-locked"
     text: imsg && imsg.unreadCount > 0 ? "󰍩 " + imsg.unreadCount : "󰍩"
-    tooltipText: !cacheReady
-      ? "iMessage: waiting for local cache"
-      : (live
-        ? "iMessage"
-        : (imsg && imsg.bridgeConnected
-          ? "iMessage: Mac online, Messages database locked"
-          : "iMessage: cached (Mac link down)"))
+    tooltipText: {
+      if (root.live) {
+        return imsg && imsg.unreadCount > 0 ? "iMessage · " + imsg.unreadCount + " unread" : "iMessage"
+      }
+      if (root.linkState === "waiting") return "iMessage: waiting for local cache"
+      if (root.linkState === "checking") return "iMessage: checking Mac link"
+      if (root.linkState === "sync-down") return "iMessage: local sync is down"
+      if (root.linkState === "mac-locked") return "iMessage: Mac online, Messages database locked"
+      return "iMessage: cached (Mac link down)"
+    }
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.LeftButton) root.toggle()
     }

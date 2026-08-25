@@ -31,10 +31,7 @@ async fn connect_and_sync(
     events: &tokio::sync::broadcast::Sender<Envelope>,
 ) -> Result<()> {
     let result = connect_and_sync_inner(config, cache, events).await;
-    {
-        let guard = cache.write().await;
-        let _ = guard.set_meta("bridge_connected", "false").await;
-    }
+    let _ = set_link_state(cache, false, false, "").await;
     result
 }
 
@@ -59,6 +56,15 @@ async fn set_link_state(
         .await?;
     guard.set_meta("last_error", last_error).await?;
     Ok(())
+}
+
+fn link_error_code(err: &impl ToString) -> String {
+    let s = err.to_string();
+    if s.contains("Database unavailable") || s.contains("Full Disk Access") {
+        "database_unavailable".into()
+    } else {
+        s
+    }
 }
 
 async fn prefetch_cache<W, R>(
@@ -128,7 +134,7 @@ async fn connect_and_sync_inner(
         Ok(()) => set_link_state(cache, true, true, "").await?,
         Err(e) => {
             warn!("prefetch failed, staying connected: {e}");
-            set_link_state(cache, true, false, &e.to_string()).await?;
+            set_link_state(cache, true, false, &link_error_code(&e)).await?;
         }
     }
 
@@ -164,7 +170,7 @@ async fn connect_and_sync_inner(
                         Ok(()) => set_link_state(cache, true, true, "").await?,
                         Err(e) => {
                             warn!("prefetch retry failed: {e}");
-                            set_link_state(cache, true, false, &e.to_string()).await?;
+                            set_link_state(cache, true, false, &link_error_code(&e)).await?;
                         }
                     }
                 }

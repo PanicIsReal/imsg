@@ -6,6 +6,7 @@
   "author": "Panic Inc.",
   "license": "MIT",
   "description": "Read-only iMessage viewer for Omarchy via local imsg-sync cache.",
+  "keepLoaded": true,
   "kinds": ["service", "bar-widget"],
   "entryPoints": {
     "service": "Service.qml",

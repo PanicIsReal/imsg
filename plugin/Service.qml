@@ -14,10 +14,19 @@ Item {
   property bool bridgeConnected: false
   property bool databaseReady: false
   property bool sending: false
+  property bool statusKnown: false
   property string lastError: ""
   property string sendError: ""
 
   readonly property bool cacheReady: chats && chats.length > 0
+  readonly property string linkState: {
+    if (!connected && !cacheReady) return "waiting"
+    if (!connected) return "sync-down"
+    if (!statusKnown) return "checking"
+    if (bridgeConnected && databaseReady) return "live"
+    if (bridgeConnected) return "mac-locked"
+    return "mac-down"
+  }
   readonly property string requestScript: {
     var resolved = ImsgClient.scriptPath(Qt.resolvedUrl("bin/request.py"))
     if (resolved !== "") return resolved
@@ -93,10 +102,8 @@ Item {
           root.unreadCount = total
         } else if (res && !res.ok) {
           root.connected = false
-          root.lastError = res.error ? res.error.message : "sync request failed"
         } else if (!res) {
           root.connected = false
-          root.lastError = "invalid response from imsg-sync"
         }
       }
     }
@@ -107,7 +114,6 @@ Item {
     onExited: function(exitCode) {
       if (exitCode !== 0) {
         root.connected = false
-        root.lastError = chatsProc.stderrText.trim() || ("request failed (code " + exitCode + ")")
       }
       chatsProc.stderrText = ""
     }
@@ -122,10 +128,10 @@ Item {
       onStreamFinished: {
         var res = ImsgClient.parseResponse(text)
         if (res && res.ok && res.result) {
-          root.bridgeConnected = res.result.bridge_connected === true
-          root.databaseReady = res.result.database_ready === true
-          if (res.result.last_error) root.lastError = String(res.result.last_error)
-          else if (root.databaseReady) root.lastError = ""
+          root.bridgeConnected = ImsgClient.flag(res.result.bridge_connected)
+          root.databaseReady = ImsgClient.flag(res.result.database_ready)
+          root.lastError = ImsgClient.friendlyError(res.result.last_error)
+          root.statusKnown = true
         }
       }
     }
@@ -167,7 +173,7 @@ Item {
           root.loadMessages(sendProc.chatId, null)
           root.refreshChats()
         } else if (res && res.error) {
-          root.sendError = res.error.message || "send failed"
+          root.sendError = ImsgClient.friendlyError(res.error.message || "send failed")
         }
       }
     }
@@ -178,7 +184,7 @@ Item {
     onExited: function(exitCode) {
       root.sending = false
       if (exitCode !== 0) {
-        root.sendError = sendProc.stderrText.trim() || ("send failed (code " + exitCode + ")")
+        root.sendError = ImsgClient.friendlyError(sendProc.stderrText.trim() || ("send failed (code " + exitCode + ")"))
       }
       sendProc.stderrText = ""
     }

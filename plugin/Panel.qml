@@ -18,13 +18,29 @@ Panel {
 
   readonly property var barIdentity: hostWidget || root
   readonly property color dim: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.15)
+  readonly property color wash: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.08)
+  readonly property color washStrong: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.14)
+  readonly property string currentTitle: {
+    if (!imsg || !imsg.chats || selectedChatId <= 0) return ""
+    for (var i = 0; i < imsg.chats.length; i++) {
+      if (imsg.chats[i].id === selectedChatId) return Models.chatTitle(imsg.chats[i])
+    }
+    return ""
+  }
   readonly property string statusLine: {
     if (!imsg) return ""
-    if (imsg.lastError && imsg.lastError.length > 0) return imsg.lastError
-    if (!imsg.connected) return "Connecting to imsg-sync…"
-    if (imsg.bridgeConnected && !imsg.databaseReady) return "Mac is online. Messages database is locked (grant Full Disk Access to imsg on the Mac)."
-    if (!imsg.bridgeConnected) return "Showing cached messages. Mac link is down."
+    if (imsg.sendError && imsg.sendError.length > 0) return imsg.sendError
+    if (imsg.linkState === "waiting") return "Waiting for local cache…"
+    if (imsg.linkState === "checking") return ""
+    if (imsg.linkState === "sync-down") return "Local sync is down."
+    if (imsg.linkState === "mac-locked") return "Mac is online. Grant Full Disk Access to imsg so Messages can unlock."
+    if (imsg.linkState === "mac-down") return "Showing cached messages. Mac link is down."
     return ""
+  }
+
+  function maybeSelectFirst() {
+    if (selectedChatId > 0 || !imsg || !imsg.chats || imsg.chats.length === 0) return
+    openChat(imsg.chats[0].id)
   }
 
   function open() {
@@ -32,6 +48,7 @@ Panel {
     if (imsg) {
       imsg.refreshChats()
       imsg.refreshStatus()
+      maybeSelectFirst()
     }
   }
 
@@ -75,13 +92,15 @@ Panel {
     bar: root.bar
     open: root.opened
     centerOnBar: true
+    gap: Style.space(16)
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(560))
-    contentHeight: panel.fittedContentHeight(Style.space(420))
+    contentHeight: panel.cappedContentHeight(Style.space(420))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      clip: true
       blocked: draftField.activeFocus
       onCloseRequested: root.close()
 
@@ -90,12 +109,16 @@ Panel {
         anchors.fill: parent
         clip: true
 
+        Row {
+          id: panes
+          anchors.fill: parent
+          spacing: Style.space(8)
+
         Item {
           id: chatPane
-          anchors.left: parent.left
-          anchors.top: parent.top
-          anchors.bottom: parent.bottom
           width: Math.floor(parent.width * 0.34)
+          height: parent.height
+          clip: true
 
           Rectangle {
             anchors.fill: parent
@@ -112,7 +135,7 @@ Panel {
             delegate: Rectangle {
               width: chatList.width
               height: chatRow.implicitHeight + Style.space(8)
-              color: selectedChatId === modelData.id ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+              color: selectedChatId === modelData.id ? root.washStrong : "transparent"
               radius: 4
 
               Column {
@@ -149,38 +172,47 @@ Panel {
 
         Item {
           id: threadPane
-          anchors.left: chatPane.right
-          anchors.right: parent.right
-          anchors.top: parent.top
-          anchors.bottom: parent.bottom
-          anchors.leftMargin: Style.space(8)
+          width: parent.width - chatPane.width - parent.spacing
+          height: parent.height
+          clip: true
 
-          Item {
-            id: statusSlot
+          Text {
+            id: statusText
             anchors.top: parent.top
             width: parent.width
-            height: root.statusLine.length > 0 ? statusText.implicitHeight : 0
+            height: root.statusLine.length > 0 ? Style.space(36) : 0
+            visible: height > 0
             clip: true
+            text: root.statusLine
+            color: imsg && imsg.sendError && imsg.sendError.length > 0 ? "#ff6b6b" : root.barForeground
+            opacity: 0.8
+            wrapMode: Text.WordWrap
+            maximumLineCount: 2
+            elide: Text.ElideRight
+            font.pixelSize: Style.font.caption
+          }
 
-            Text {
-              id: statusText
-              width: parent.width
-              text: root.statusLine
-              color: imsg && imsg.lastError && imsg.lastError.length > 0 ? "#ff6b6b" : root.barForeground
-              opacity: 0.8
-              wrapMode: Text.WordWrap
-              font.pixelSize: Style.font.caption
-            }
+          Text {
+            id: threadTitle
+            anchors.top: statusText.bottom
+            anchors.topMargin: statusText.visible ? Style.space(4) : 0
+            width: parent.width
+            height: root.currentTitle.length > 0 ? Style.space(22) : 0
+            visible: height > 0
+            text: root.currentTitle
+            color: root.barForeground
+            font.bold: true
+            elide: Text.ElideRight
           }
 
           ListView {
             id: threadView
-            anchors.top: statusSlot.bottom
-            anchors.topMargin: statusSlot.height > 0 ? Style.space(4) : 0
+            anchors.top: threadTitle.bottom
+            anchors.topMargin: threadTitle.visible ? Style.space(4) : 0
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: composerRow.top
-            anchors.bottomMargin: Style.space(4)
+            anchors.bottomMargin: Style.space(8)
             model: imsg ? imsg.messages : []
             clip: true
             spacing: Style.space(4)
@@ -205,29 +237,47 @@ Panel {
             }
 
             delegate: Item {
-              width: threadView.width
-              height: bubble.implicitHeight + Style.space(4)
+              visible: Models.messageText(modelData).length > 0
+              width: ListView.view ? ListView.view.width : 0
+              height: visible ? bubble.height + Style.space(4) : 0
 
               Rectangle {
                 id: bubble
-                anchors.left: modelData.is_from_me ? undefined : parent.left
-                anchors.right: modelData.is_from_me ? parent.right : undefined
-                width: Math.min(threadView.width * 0.78, bubbleText.implicitWidth + Style.space(16))
-                implicitHeight: bubbleText.implicitHeight + Style.space(12)
+                readonly property bool fromMe: modelData.is_from_me === true
+                anchors.left: fromMe ? undefined : parent.left
+                anchors.right: fromMe ? parent.right : undefined
+                width: Math.round(parent.width * 0.78)
+                height: bubbleText.implicitHeight + Style.space(16)
                 radius: 8
-                color: modelData.is_from_me ? Qt.rgba(0.2, 0.5, 1, 0.35) : Qt.rgba(1, 1, 1, 0.1)
+                color: fromMe ? Qt.rgba(0.2, 0.5, 1, 0.35) : Qt.rgba(0, 0, 0, 0.08)
+                border.width: fromMe ? 0 : 1
+                border.color: fromMe ? "transparent" : root.dim
 
                 Text {
                   id: bubbleText
-                  anchors.centerIn: parent
-                  width: Math.min(threadView.width * 0.72, implicitWidth)
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.margins: Style.space(8)
                   wrapMode: Text.Wrap
-                  text: modelData.text || ""
+                  text: Models.messageText(modelData)
                   color: root.barForeground
                   font.pixelSize: Style.font.body
                 }
               }
             }
+          }
+
+          Text {
+            anchors.centerIn: threadView
+            width: threadView.width * 0.8
+            visible: !imsg || !imsg.messages || imsg.messages.length === 0
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+            color: root.barForeground
+            opacity: 0.45
+            font.pixelSize: Style.font.body
+            text: selectedChatId > 0 ? "No messages in this chat yet." : "Select a conversation."
           }
 
           Row {
@@ -242,7 +292,7 @@ Panel {
               width: parent.width - sendBtn.width - Style.space(4)
               height: parent.height
               radius: 8
-              color: Qt.rgba(1, 1, 1, 0.06)
+              color: root.wash
               border.width: 1
               border.color: root.dim
 
@@ -275,7 +325,15 @@ Panel {
             }
           }
         }
+        }
       }
+    }
+  }
+
+  Connections {
+    target: imsg
+    function onChatsChanged() {
+      if (root.opened) root.maybeSelectFirst()
     }
   }
 }
