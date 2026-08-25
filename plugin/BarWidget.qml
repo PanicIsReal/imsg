@@ -1,14 +1,19 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import qs.Ui
 
 BarWidget {
   id: root
   moduleName: "io.github.panic.imessage"
 
+  property var shellService: null
+  readonly property var imsg: shellService
   readonly property bool opened: panelLoader.item
     ? panelLoader.item.opened === true
     : false
+  readonly property bool cacheReady: imsg && imsg.chats && imsg.chats.length > 0
+  readonly property bool live: imsg && imsg.bridgeConnected && imsg.databaseReady
 
   function open() {
     if (panelLoader.item) panelLoader.item.open()
@@ -27,19 +32,34 @@ BarWidget {
     panelLoader.item.bar = root.bar
     panelLoader.item.anchorItem = button
     panelLoader.item.hostWidget = root
-    panelLoader.item.imsg = serviceLoader.item
+    panelLoader.item.imsg = imsg
+  }
+
+  function resolveService() {
+    if (!bar || !bar.shell) return
+    var svc = bar.shell.serviceFor("io.github.panic.imessage")
+    if (svc && svc !== shellService) {
+      shellService = svc
+      injectPanel()
+    }
   }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  onBarChanged: injectPanel()
+  onBarChanged: {
+    resolveService()
+    if (!shellService) servicePoll.restart()
+  }
 
-  Loader {
-    id: serviceLoader
-    active: true
-    source: Qt.resolvedUrl("Service.qml")
-    visible: false
+  Timer {
+    id: servicePoll
+    interval: 500
+    repeat: true
+    onTriggered: {
+      root.resolveService()
+      if (root.shellService) stop()
+    }
   }
 
   Loader {
@@ -51,16 +71,33 @@ BarWidget {
       root.injectPanel()
       Qt.callLater(root.injectPanel)
     }
+    onStatusChanged: {
+      if (status === Loader.Error) console.warn("imessage panel failed:", errorString())
+    }
+  }
+
+  IpcHandler {
+    target: "io.github.panic.imessage"
+
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
   }
 
   WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: serviceLoader.item && serviceLoader.item.unreadCount > 0
-      ? "\uf4ad " + serviceLoader.item.unreadCount
-      : "\uf4ad"
-    tooltipText: "iMessage"
+    text: imsg && imsg.unreadCount > 0 ? "󰍩 " + imsg.unreadCount : "󰍩"
+    tooltipText: !cacheReady
+      ? "iMessage: waiting for local cache"
+      : (live
+        ? "iMessage"
+        : (imsg && imsg.bridgeConnected
+          ? "iMessage: Mac online, Messages database locked"
+          : "iMessage: cached (Mac link down)"))
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.LeftButton) root.toggle()
     }

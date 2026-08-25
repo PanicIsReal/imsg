@@ -3,26 +3,59 @@ import Quickshell
 import Quickshell.Io
 import "js/ImsgClient.js" as ImsgClient
 
-QtObject {
+Item {
   id: root
   property int unreadCount: 0
   property var chats: []
   property int openChatId: 0
   property var messages: []
   property bool syncing: true
+  property bool connected: false
+  property bool bridgeConnected: false
+  property bool databaseReady: false
+  property bool sending: false
   property string lastError: ""
+  property string sendError: ""
+
+  readonly property bool cacheReady: chats && chats.length > 0
+  readonly property string requestScript: {
+    var resolved = ImsgClient.scriptPath(Qt.resolvedUrl("bin/request.py"))
+    if (resolved !== "") return resolved
+    var home = Quickshell.env("HOME") || ""
+    return home + "/.config/omarchy/plugins/io.github.panic.imessage/bin/request.py"
+  }
 
   function refreshChats() {
-    chatsProc.command = ["sh", "-c", ImsgClient.request("chats.list", { limit: 50 })]
+    if (requestScript === "" || chatsProc.running) return
+    chatsProc.command = ImsgClient.command(requestScript, "chats.list", { limit: 50 })
     chatsProc.running = true
   }
 
+  function refreshStatus() {
+    if (requestScript === "" || statusProc.running) return
+    statusProc.command = ImsgClient.command(requestScript, "status", {})
+    statusProc.running = true
+  }
+
   function loadMessages(chatId, before) {
-    if (!chatId) return
+    if (!chatId || requestScript === "" || historyProc.running) return
     var params = { chat_id: chatId, limit: 50 }
     if (before) params.before = before
-    historyProc.command = ["sh", "-c", ImsgClient.request("messages.history", params)]
+    historyProc.beforeCursor = before || ""
+    historyProc.command = ImsgClient.command(requestScript, "messages.history", params)
     historyProc.running = true
+  }
+
+  function sendMessage(chatId, text) {
+    if (!chatId || !text || text.trim().length === 0 || requestScript === "" || sendProc.running) return
+    sendError = ""
+    sendProc.chatId = chatId
+    sendProc.command = ImsgClient.command(requestScript, "messages.send", {
+      chat_id: chatId,
+      text: text.trim()
+    })
+    sendProc.running = true
+    sending = true
   }
 
   function notifyInbound(sender, body, chatId) {
@@ -34,29 +67,66 @@ QtObject {
     interval: 5000
     running: true
     repeat: true
-    onTriggered: root.refreshChats()
+    onTriggered: {
+      root.refreshChats()
+      root.refreshStatus()
+    }
   }
 
   Process {
     id: chatsProc
     running: false
+    command: []
+    property string stderrText: ""
     stdout: StdioCollector {
+      waitForEnd: true
       onStreamFinished: {
         var res = ImsgClient.parseResponse(text)
         if (res && res.ok && res.result && res.result.chats) {
           root.chats = res.result.chats
           root.syncing = false
+          root.connected = true
           var total = 0
           for (var i = 0; i < root.chats.length; i++) {
             total += root.chats[i].unread_count || 0
           }
           root.unreadCount = total
+        } else if (res && !res.ok) {
+          root.connected = false
+          root.lastError = res.error ? res.error.message : "sync request failed"
+        } else if (!res) {
+          root.connected = false
+          root.lastError = "invalid response from imsg-sync"
         }
       }
     }
     stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: { chatsProc.stderrText = text }
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.connected = false
+        root.lastError = chatsProc.stderrText.trim() || ("request failed (code " + exitCode + ")")
+      }
+      chatsProc.stderrText = ""
+    }
+  }
+
+  Process {
+    id: statusProc
+    running: false
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
       onStreamFinished: {
-        if (text.length > 0) root.lastError = text
+        var res = ImsgClient.parseResponse(text)
+        if (res && res.ok && res.result) {
+          root.bridgeConnected = res.result.bridge_connected === true
+          root.databaseReady = res.result.database_ready === true
+          if (res.result.last_error) root.lastError = String(res.result.last_error)
+          else if (root.databaseReady) root.lastError = ""
+        }
       }
     }
   }
@@ -64,8 +134,10 @@ QtObject {
   Process {
     id: historyProc
     running: false
+    command: []
     property string beforeCursor: ""
     stdout: StdioCollector {
+      waitForEnd: true
       onStreamFinished: {
         var res = ImsgClient.parseResponse(text)
         if (res && res.ok && res.result && res.result.messages) {
@@ -80,5 +152,40 @@ QtObject {
     }
   }
 
-  Component.onCompleted: refreshChats()
+  Process {
+    id: sendProc
+    running: false
+    command: []
+    property int chatId: 0
+    property string stderrText: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var res = ImsgClient.parseResponse(text)
+        if (res && res.ok) {
+          root.sendError = ""
+          root.loadMessages(sendProc.chatId, null)
+          root.refreshChats()
+        } else if (res && res.error) {
+          root.sendError = res.error.message || "send failed"
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: { sendProc.stderrText = text }
+    }
+    onExited: function(exitCode) {
+      root.sending = false
+      if (exitCode !== 0) {
+        root.sendError = sendProc.stderrText.trim() || ("send failed (code " + exitCode + ")")
+      }
+      sendProc.stderrText = ""
+    }
+  }
+
+  Component.onCompleted: {
+    refreshChats()
+    refreshStatus()
+  }
 }

@@ -73,15 +73,53 @@ async fn handle_client(stream: UnixStream, cache: Arc<RwLock<MessageCache>>) -> 
 }
 
 async fn dispatch(cache: &Arc<RwLock<MessageCache>>, method: &str, params: Value) -> Result<Value> {
-    let guard = cache.read().await;
     match method {
-        "status" => Ok(json!({"connected": true, "protocol": imsg_proto::PROTOCOL_VERSION})),
+        "status" => {
+            let guard = cache.read().await;
+            let bridge_connected = guard
+                .get_meta("bridge_connected")
+                .await?
+                .is_some_and(|v| v == "true");
+            let database_ready = guard
+                .get_meta("database_ready")
+                .await?
+                .is_some_and(|v| v == "true");
+            let last_error = guard.get_meta("last_error").await?.unwrap_or_default();
+            Ok(json!({
+                "connected": true,
+                "bridge_connected": bridge_connected,
+                "database_ready": database_ready,
+                "last_error": last_error,
+                "protocol": imsg_proto::PROTOCOL_VERSION
+            }))
+        }
+        "messages.send" => {
+            let chat_id = params["chat_id"].as_i64().context("chat_id required")?;
+            let text = params["text"].as_str().context("text required")?;
+            let config = crate::config::SyncConfig::load()?;
+            let result = crate::client::bridge_request(
+                &config,
+                "send",
+                json!({"chat_id": chat_id, "text": text}),
+            )
+            .await?;
+            if let Some(msg) = result.get("message") {
+                let guard = cache.write().await;
+                guard.upsert_message(msg).await?;
+            } else if result.is_object() && result.get("id").is_some() {
+                let guard = cache.write().await;
+                guard.upsert_message(&result).await?;
+            }
+            Ok(json!({"ok": true, "message": result}))
+        }
         "chats.list" => {
+            let guard = cache.read().await;
             let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
             let chats = guard.list_chats(limit).await?;
             Ok(json!({"chats": chats}))
         }
         "messages.history" => {
+            let guard = cache.read().await;
             let chat_id = params["chat_id"].as_i64().context("chat_id required")?;
             let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
             let before = params.get("before").and_then(|v| v.as_str());
@@ -89,6 +127,7 @@ async fn dispatch(cache: &Arc<RwLock<MessageCache>>, method: &str, params: Value
             Ok(json!({"messages": messages}))
         }
         "messages.search" => {
+            let guard = cache.read().await;
             let query = params["query"].as_str().context("query required")?;
             let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
             let rows = sqlx::query_scalar::<_, String>(

@@ -9,8 +9,12 @@ function parseResponse(stdout) {
   }
 }
 
-function request(method, params) {
-  var paramsJson = JSON.stringify(params || {})
-  var cmd = "imsg-sync request " + method + " --params '" + paramsJson.replace(/'/g, "'\\''") + "'"
-  return cmd
+function scriptPath(resolvedUrl) {
+  var s = String(resolvedUrl || "")
+  if (s.indexOf("file://") === 0) s = s.substring(7)
+  return decodeURIComponent(s)
+}
+
+function command(script, method, params) {
+  return ["/usr/bin/python3", script, method, JSON.stringify(params || {})]
 }

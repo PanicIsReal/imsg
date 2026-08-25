@@ -30,53 +30,158 @@ async fn connect_and_sync(
     cache: &Arc<RwLock<MessageCache>>,
     events: &tokio::sync::broadcast::Sender<Envelope>,
 ) -> Result<()> {
+    let result = connect_and_sync_inner(config, cache, events).await;
+    {
+        let guard = cache.write().await;
+        let _ = guard.set_meta("bridge_connected", "false").await;
+    }
+    result
+}
+
+async fn set_link_state(
+    cache: &Arc<RwLock<MessageCache>>,
+    bridge_connected: bool,
+    database_ready: bool,
+    last_error: &str,
+) -> Result<()> {
+    let guard = cache.write().await;
+    guard
+        .set_meta(
+            "bridge_connected",
+            if bridge_connected { "true" } else { "false" },
+        )
+        .await?;
+    guard
+        .set_meta(
+            "database_ready",
+            if database_ready { "true" } else { "false" },
+        )
+        .await?;
+    guard.set_meta("last_error", last_error).await?;
+    Ok(())
+}
+
+async fn prefetch_cache<W, R>(
+    write: &mut W,
+    read: &mut R,
+    config: &SyncConfig,
+    cache: &Arc<RwLock<MessageCache>>,
+) -> Result<()>
+where
+    W: SinkExt<Message> + Unpin,
+    W::Error: std::error::Error + Send + Sync + 'static,
+    R: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let chats = rpc_call(
+        write,
+        read,
+        "chats.list",
+        json!({"limit": config.prefetch_chats}),
+    )
+    .await?;
+    let list = chats
+        .get("chats")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for chat in list {
+        {
+            let guard = cache.write().await;
+            guard.upsert_chat(&chat).await?;
+        }
+        let Some(id) = chat.get("id").and_then(|v| v.as_i64()) else {
+            continue;
+        };
+        let hist = rpc_call(
+            write,
+            read,
+            "messages.history",
+            json!({"chat_id": id, "limit": config.prefetch_messages}),
+        )
+        .await?;
+        if let Some(msgs) = hist.get("messages").and_then(|v| v.as_array()) {
+            let guard = cache.write().await;
+            for msg in msgs {
+                guard.upsert_message(msg).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn connect_and_sync_inner(
+    config: &SyncConfig,
+    cache: &Arc<RwLock<MessageCache>>,
+    events: &tokio::sync::broadcast::Sender<Envelope>,
+) -> Result<()> {
     let tls = build_tls(config)?;
     let connector = Connector::Rustls(Arc::new(tls));
     let (ws, _) = connect_async_tls_with_config(&config.bridge_url, None, false, Some(connector))
         .await
         .context("connect bridge")?;
     info!("connected to bridge");
+    set_link_state(cache, true, false, "").await?;
 
     let (mut write, mut read) = ws.split();
 
-    let chats = rpc_call(&mut write, &mut read, "chats.list", json!({"limit": config.prefetch_chats})).await?;
-    if let Some(list) = chats.get("chats").and_then(|v| v.as_array()) {
-        let guard = cache.write().await;
-        for chat in list {
-            guard.upsert_chat(chat).await?;
-            if let Some(id) = chat.get("id").and_then(|v| v.as_i64()) {
-                let hist = rpc_call(
-                    &mut write,
-                    &mut read,
-                    "messages.history",
-                    json!({"chat_id": id, "limit": config.prefetch_messages}),
-                )
-                .await?;
-                if let Some(msgs) = hist.get("messages").and_then(|v| v.as_array()) {
-                    for msg in msgs {
-                        guard.upsert_message(msg).await?;
-                    }
-                }
-            }
+    match prefetch_cache(&mut write, &mut read, config, cache).await {
+        Ok(()) => set_link_state(cache, true, true, "").await?,
+        Err(e) => {
+            warn!("prefetch failed, staying connected: {e}");
+            set_link_state(cache, true, false, &e.to_string()).await?;
         }
     }
 
-    while let Some(msg) = read.next().await {
-        match msg? {
-            Message::Text(text) => {
-                if let Ok(Envelope::Event { topic, payload }) = Envelope::parse_line(&text) {
-                    if topic == "message" {
-                        let guard = cache.write().await;
-                        guard.upsert_message(&payload).await?;
-                        let _ = events.send(Envelope::Event { topic, payload });
+    let mut retry = tokio::time::interval(std::time::Duration::from_secs(30));
+    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            msg = read.next() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(Envelope::Event { topic, payload }) = Envelope::parse_line(&text) {
+                            if topic == "message" {
+                                let guard = cache.write().await;
+                                guard.upsert_message(&payload).await?;
+                                let _ = events.send(Envelope::Event { topic, payload });
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => return Err(e.into()),
+                }
+            }
+            _ = retry.tick() => {
+                let ready = cache
+                    .read()
+                    .await
+                    .get_meta("database_ready")
+                    .await?
+                    .is_some_and(|v| v == "true");
+                if !ready {
+                    match prefetch_cache(&mut write, &mut read, config, cache).await {
+                        Ok(()) => set_link_state(cache, true, true, "").await?,
+                        Err(e) => {
+                            warn!("prefetch retry failed: {e}");
+                            set_link_state(cache, true, false, &e.to_string()).await?;
+                        }
                     }
                 }
             }
-            Message::Close(_) => break,
-            _ => {}
         }
     }
     Ok(())
+}
+
+pub async fn bridge_request(config: &SyncConfig, method: &str, params: Value) -> Result<Value> {
+    let tls = build_tls(config)?;
+    let connector = Connector::Rustls(Arc::new(tls));
+    let (ws, _) = connect_async_tls_with_config(&config.bridge_url, None, false, Some(connector))
+        .await
+        .context("connect bridge")?;
+    let (mut write, mut read) = ws.split();
+    rpc_call(&mut write, &mut read, method, params).await
 }
 
 async fn rpc_call<W, R>(
