@@ -1,0 +1,14 @@
+[Unit]
+Description=iMessage sync daemon for Omarchy
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/imsg-sync run
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=imsg_sync=info
+
+[Install]
+WantedBy=default.target

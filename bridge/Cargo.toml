@@ -1,0 +1,40 @@
+[package]
+name = "imsg-bridge"
+description = "Mac-side iMessage bridge over Tailscale/LAN (wraps imsg rpc)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "imsg-bridge"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+dirs = { workspace = true }
+futures-util = { workspace = true }
+imsg-proto = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = "0.4"
+hmac = "0.12"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+toml = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+
+[dev-dependencies]
+tempfile = "3"

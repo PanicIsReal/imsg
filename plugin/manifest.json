@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.panic.imessage",
+  "name": "iMessage",
+  "version": "0.1.0",
+  "author": "Panic Inc.",
+  "license": "MIT",
+  "description": "Read-only iMessage viewer for Omarchy via local imsg-sync cache.",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "iMessage",
+    "category": "Communication",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

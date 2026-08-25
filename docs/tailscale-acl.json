@@ -1,0 +1,13 @@
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["tag:omarchy-imessage"],
+      "dst": ["tag:imessage-bridge:18789"]
+    }
+  ],
+  "tagOwners": {
+    "tag:imessage-bridge": ["autogroup:admin"],
+    "tag:omarchy-imessage": ["autogroup:admin"]
+  }
+}
