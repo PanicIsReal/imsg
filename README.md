@@ -29,6 +29,8 @@ https://github.com/PanicIsReal/imsg/releases
 - `imsg-macos-aarch64.tar.gz` — `imsg`, `imsg-tui`, and `Imsg Setup.app`
 - `imsg-linux-x86_64.tar.gz` — `imsg` for Omarchy
 
+Push an annotated or lightweight tag that matches `v*` to origin. A tag such as `v0.1.0` runs `.github/workflows/release.yml` and publishes the assets listed above.
+
 ## Notes
 
 The bridge refuses `0.0.0.0`. Use a Tailscale or LAN address. Pairing codes last 15 minutes. The Omarchy plugin talks to the local Linux daemon only.
