@@ -3,3 +3,6 @@
 **/*.db-*
 .DS_Store
 docs/evidence/pr0-output.ndjson
+.audit/
+dist/
+tui/imsg-tui

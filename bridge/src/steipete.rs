@@ -32,8 +32,8 @@ pub fn ensure_steipete_imsg(configured: &str) -> Result<PathBuf> {
     if let Some(brew) = resolve_brew() {
         let _ = Command::new(&brew)
             .args(["install", FORMULA])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
             .status();
     }
     resolve_steipete_imsg(configured).ok_or_else(missing_error)

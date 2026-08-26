@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[lib]
+name = "imsg_bridge"
+path = "src/lib.rs"
+
 [[bin]]
 name = "imsg-bridge"
 path = "src/main.rs"
@@ -19,7 +23,7 @@ clap = { workspace = true }
 dirs = { workspace = true }
 futures-util = { workspace = true }
 imsg-proto = { workspace = true }
-rcgen = { workspace = true }
+rcgen = { workspace = true, features = ["pem", "x509-parser"] }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true }
@@ -27,6 +31,8 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 hex = "0.4"
 hmac = "0.12"
+hostname = "0.4"
+mdns-sd = "0.13"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -7,6 +8,9 @@ use std::path::PathBuf;
 pub struct Config {
     pub bind: String,
     pub port: u16,
+    /// TLS enrollment endpoint (pairing); defaults to port + 1.
+    #[serde(default = "default_enroll_port")]
+    pub enroll_port: u16,
     pub imsg_path: String,
     /// Ghostty is the FDA/TCC parent of the running bridge.
     #[serde(default = "default_ghostty_path")]
@@ -14,6 +18,15 @@ pub struct Config {
     pub enable_send: bool,
     pub data_dir: PathBuf,
     pub pairing_code: Option<String>,
+    #[serde(default)]
+    pub pairing_code_expires_at: Option<DateTime<Utc>>,
+    /// Advertise bridge via mDNS on LAN (discovery only; pairing still required).
+    #[serde(default)]
+    pub mdns_advertise: bool,
+}
+
+fn default_enroll_port() -> u16 {
+    18790
 }
 
 fn default_ghostty_path() -> String {
@@ -28,11 +41,14 @@ impl Default for Config {
         Self {
             bind: "127.0.0.1".into(),
             port: 18789,
+            enroll_port: 18790,
             imsg_path: "imsg".into(),
             ghostty_path: default_ghostty_path(),
             enable_send: false,
             data_dir,
             pairing_code: None,
+            pairing_code_expires_at: None,
+            mdns_advertise: false,
         }
     }
 }

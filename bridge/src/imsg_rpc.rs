@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{broadcast, Mutex, oneshot};
 use tracing::{debug, info, warn};
 
 static REQ_ID: AtomicU64 = AtomicU64::new(1);
@@ -169,6 +169,7 @@ pub fn bridge_method_to_imsg(method: &str) -> Option<&'static str> {
         "messages.after" => Some("messages.after"),
         "messages.search" => Some("messages.search"),
         "handles.check" => Some("handles.check"),
+        "send" => Some("send"),
         "watch.ack" => None,
         "attachments.fetch" => None,
         _ => None,

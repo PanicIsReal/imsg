@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+APP_ROOT="$(cd "$HERE/../.." && pwd)"
+PARENT="$(cd "$APP_ROOT/.." && pwd)"
+IMSG=""
+if [[ -x "$HERE/imsg" ]]; then
+  IMSG="$HERE/imsg"
+elif [[ -x "$PARENT/imsg" ]]; then
+  IMSG="$PARENT/imsg"
+elif command -v imsg >/dev/null 2>&1; then
+  IMSG="$(command -v imsg)"
+else
+  echo "imsg not found next to Imsg Setup.app" >&2
+  exit 1
+fi
+if [[ -x "$HERE/imsg-tui" ]]; then
+  export IMSG_TUI="$HERE/imsg-tui"
+elif [[ -x "$PARENT/imsg-tui" ]]; then
+  export IMSG_TUI="$PARENT/imsg-tui"
+fi
+export IMSG_BIN="$IMSG"
+exec /usr/bin/open -na /Applications/Ghostty.app --args -e "$IMSG" setup

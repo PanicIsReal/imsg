@@ -2,13 +2,15 @@ use crate::attachments;
 use crate::config::Config;
 use crate::contacts;
 use crate::imsg_rpc::{bridge_method_to_imsg, envelope_error, envelope_ok, ImsgRpc};
+use crate::mdns_advertise;
+use crate::pairing;
+use crate::tls;
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use axum_server::tls_rustls::RustlsConfig;
 use futures_util::{SinkExt, StreamExt};
 use imsg_proto::{ContactsState, Envelope};
 use serde_json::json;
@@ -30,9 +32,24 @@ pub struct AppState {
     pub contacts_gate: Arc<Mutex<()>>,
 }
 
-pub async fn run(config: Config, tls: RustlsConfig) -> Result<()> {
+pub async fn run(config: Config) -> Result<()> {
     config.validate_bind()?;
     let addr: SocketAddr = format!("{}:{}", config.bind, config.port).parse()?;
+
+    let tls_mat = tls::load_server_config(&config.data_dir)?;
+    let wss_tls = axum_server::tls_rustls::RustlsConfig::from_config(tls_mat.server_config.clone());
+    let enroll_tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
+        tls::load_enroll_tls_config(&config.data_dir)?,
+    ));
+
+    mdns_advertise::spawn_if_enabled(&config)?;
+
+    let enroll_config = config.clone();
+    tokio::spawn(async move {
+        if let Err(e) = pairing::run_enroll_server(enroll_config, enroll_tls).await {
+            warn!("enroll server: {e}");
+        }
+    });
 
     let rpc = ImsgRpc::spawn(&config.imsg_path).await?;
     let status = rpc.status().await.unwrap_or(json!({}));
@@ -60,7 +77,7 @@ pub async fn run(config: Config, tls: RustlsConfig) -> Result<()> {
         .with_state(state);
 
     info!("imsg-bridge listening on wss://{addr}");
-    axum_server::bind_rustls(addr, tls)
+    axum_server::bind_rustls(addr, wss_tls)
         .serve(app.into_make_service())
         .await?;
     Ok(())
@@ -175,32 +192,21 @@ async fn handle_envelope(state: &AppState, env: Envelope) -> Option<Envelope> {
                 return Some(handle_contacts_authorize(state, &id).await);
             }
             if !imsg_proto::Envelope::method_allowed(&method) && !state.config.enable_send {
-                return Some(envelope_error(
-                    &id,
-                    "forbidden",
-                    &format!("method not allowed: {method}"),
-                ));
+                return Some(envelope_error(&id, "forbidden", &format!("method not allowed: {method}")));
             }
             if method == "watch.ack" {
                 return Some(envelope_ok(&id, json!({"ok": true})));
             }
             if method == "attachments.fetch" {
-                let chat_guid = params
-                    .get("chat_guid")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let message_guid = params
-                    .get("message_guid")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let filename = params
-                    .get("filename")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let chat_guid = params.get("chat_guid").and_then(|v| v.as_str()).unwrap_or("");
+                let message_guid = params.get("message_guid").and_then(|v| v.as_str()).unwrap_or("");
+                let filename = params.get("filename").and_then(|v| v.as_str()).unwrap_or("");
                 let secret = state.config.data_dir.to_string_lossy().into_owned();
-                let token =
-                    attachments::token_for(chat_guid, message_guid, filename, secret.as_bytes());
-                return Some(envelope_ok(&id, json!({"token": token, "expires_in": 300})));
+                let token = attachments::token_for(chat_guid, message_guid, filename, secret.as_bytes());
+                return Some(envelope_ok(
+                    &id,
+                    json!({"token": token, "expires_in": 300}),
+                ));
             }
             if let Some(imsg_method) = bridge_method_to_imsg(&method) {
                 match state.rpc.call(imsg_method, params).await {
@@ -208,11 +214,7 @@ async fn handle_envelope(state: &AppState, env: Envelope) -> Option<Envelope> {
                     Err(e) => Some(envelope_error(&id, "upstream_error", &e.to_string())),
                 }
             } else {
-                Some(envelope_error(
-                    &id,
-                    "unknown_method",
-                    &format!("unknown: {method}"),
-                ))
+                Some(envelope_error(&id, "unknown_method", &format!("unknown: {method}")))
             }
         }
         _ => None,
