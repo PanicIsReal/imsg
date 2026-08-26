@@ -84,3 +84,50 @@ function totalUnread(chats) {
   for (var i = 0; i < chats.length; i++) n += chats[i].unread_count || 0
   return n
 }
+
+function setupGuide(s) {
+  s = s || {}
+  if (s.cacheReady) {
+    return {
+      phase: "ready",
+      title: "",
+      body: "",
+      hint: "",
+      actionKind: s.contacts === "unavailable" ? "contacts" : ""
+    }
+  }
+  if (!s.connected) {
+    return {
+      phase: "needs-sync",
+      title: "iMessage is not running here yet",
+      body: "Start the local sync service. This panel fills in from your Mac after that.",
+      hint: "imsg sync run",
+      actionKind: ""
+    }
+  }
+  if (!s.statusKnown) {
+    return {
+      phase: "checking",
+      title: "Checking the Mac link…",
+      body: "Hang on a second.",
+      hint: "",
+      actionKind: ""
+    }
+  }
+  if (s.bridgeConnected && !s.databaseReady) {
+    return {
+      phase: "needs-fda",
+      title: "Messages is locked on your Mac",
+      body: "Grant Full Disk Access to Ghostty, the window titled imsg-bridge-serve. The list appears after that.",
+      hint: "",
+      actionKind: ""
+    }
+  }
+  return {
+    phase: "needs-mac",
+    title: "This machine is not linked",
+    body: "Pair Omarchy with the Mac. On the Mac run a pairing rotate, then run the command below here.",
+    hint: "imsg setup pair <code> --host <mac-tailscale-ip>",
+    actionKind: ""
+  }
+}

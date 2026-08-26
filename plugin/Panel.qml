@@ -3,6 +3,7 @@ import Quickshell
 import qs.Commons
 import qs.Ui
 import "js/Models.js" as Models
+import "js/Store.js" as Store
 
 Panel {
   id: root
@@ -27,14 +28,21 @@ Panel {
     }
     return ""
   }
+  readonly property var setupGuide: imsg && imsg.setupGuide ? imsg.setupGuide : Store.setupGuide({
+    connected: false,
+    cacheReady: false,
+    statusKnown: false,
+    bridgeConnected: false,
+    databaseReady: false,
+    lastError: "",
+    contacts: "unknown"
+  })
+  readonly property bool setupReady: root.setupGuide.phase === "ready"
   readonly property string statusLine: {
     if (!imsg) return ""
     if (imsg.sendError && imsg.sendError.length > 0) return imsg.sendError
-    if (imsg.linkState === "waiting") return "Waiting for local cache…"
-    if (imsg.linkState === "checking") return ""
-    if (imsg.linkState === "sync-down") return "Local sync is down."
-    if (imsg.linkState === "mac-locked") return "Mac is online. Grant Full Disk Access to imsg so Messages can unlock."
-    if (imsg.linkState === "mac-down") return "Showing cached messages. Mac link is down."
+    if (imsg.linkState === "mac-locked") return "Messages is locked on your Mac. Grant Full Disk Access to Ghostty."
+    if (imsg.linkState === "mac-down") return "Showing saved messages. The Mac link is down."
     return ""
   }
 
@@ -48,7 +56,8 @@ Panel {
     if (imsg) {
       imsg.refreshChats()
       imsg.refreshStatus()
-      maybeSelectFirst()
+      if (selectedChatId > 0) openChat(selectedChatId)
+      else maybeSelectFirst()
     }
   }
 
@@ -110,8 +119,47 @@ Panel {
         anchors.fill: parent
         clip: true
 
+        Column {
+          id: setupCard
+          visible: !root.setupReady
+          anchors.centerIn: parent
+          width: Math.min(parent.width - Style.space(48), Style.space(420))
+          spacing: Style.space(12)
+
+          Text {
+            width: parent.width
+            text: root.setupGuide.title
+            color: root.barForeground
+            font.bold: true
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
+          }
+          Text {
+            width: parent.width
+            text: root.setupGuide.body
+            color: root.barForeground
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
+            opacity: 0.85
+          }
+          TextEdit {
+            width: parent.width
+            visible: root.setupGuide.hint && root.setupGuide.hint.length > 0
+            text: root.setupGuide.hint || ""
+            color: root.barForeground
+            readOnly: true
+            selectByMouse: true
+            wrapMode: TextEdit.Wrap
+            font.family: "monospace"
+            font.pixelSize: Style.font.caption
+            horizontalAlignment: TextEdit.AlignHCenter
+            opacity: 0.7
+          }
+        }
+
         Row {
           id: panes
+          visible: root.setupReady
           anchors.fill: parent
           spacing: Style.space(8)
 
@@ -154,12 +202,23 @@ Panel {
                   font.bold: true
                   elide: Text.ElideRight
                 }
-                Text {
+                Row {
                   width: parent.width
-                  text: Models.formatTime(modelData.last_message_at)
-                  color: root.barForeground
-                  opacity: 0.6
-                  font.pixelSize: Style.font.caption
+                  spacing: Style.space(8)
+
+                  Text {
+                    text: Models.formatTime(modelData.last_message_at)
+                    color: root.barForeground
+                    opacity: 0.6
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    visible: (modelData.unread_count || 0) > 0
+                    text: String(modelData.unread_count || 0)
+                    color: root.barForeground
+                    opacity: 0.7
+                    font.pixelSize: Style.font.caption
+                  }
                 }
               }
 
@@ -199,12 +258,12 @@ Panel {
             anchors.topMargin: visible ? Style.space(4) : 0
             width: parent.width
             height: visible ? Style.space(28) : 0
-            visible: imsg && (imsg.contactsState === "unavailable" || imsg.contactsState === "prompting")
+            visible: root.setupGuide.actionKind === "contacts" || (imsg && imsg.contactsState === "prompting")
             clip: true
 
             WidgetButton {
               anchors.fill: parent
-              visible: imsg && imsg.contactsState === "unavailable"
+              visible: root.setupGuide.actionKind === "contacts"
               bar: root.bar
               text: "Show contact names…"
               onPressed: function() { imsg.requestContactsAccess() }

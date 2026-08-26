@@ -30,6 +30,15 @@ Item {
     return "mac-down"
   }
   readonly property string contactsState: root.contacts || "unknown"
+  readonly property var setupGuide: Store.setupGuide({
+    connected: root.connected,
+    cacheReady: root.cacheReady,
+    statusKnown: root.statusKnown,
+    bridgeConnected: root.bridgeConnected,
+    databaseReady: root.databaseReady,
+    lastError: root.lastError,
+    contacts: root.contacts
+  })
   readonly property string requestScript: {
     var resolved = ImsgClient.scriptPath(Qt.resolvedUrl("bin/request.py"))
     if (resolved !== "") return resolved
