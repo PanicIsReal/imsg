@@ -229,11 +229,25 @@ async fn dispatch(
                 .call("send", json!({"chat_id": chat_id, "text": text}))
                 .await?;
             let applied = {
-                let guard = cache.write().await;
-                if let Some(msg) = result.get("message") {
-                    Some(guard.apply_live_message(msg).await?)
+                let mut msg = if let Some(inner) = result.get("message") {
+                    inner.clone()
                 } else if result.is_object() && result.get("id").is_some() {
-                    Some(guard.apply_live_message(&result).await?)
+                    result.clone()
+                } else {
+                    Value::Null
+                };
+                if msg.is_object() {
+                    if msg.get("chat_id").and_then(|v| v.as_i64()).unwrap_or(0) == 0 {
+                        msg["chat_id"] = json!(chat_id);
+                    }
+                    if msg.get("is_from_me").is_none() {
+                        msg["is_from_me"] = json!(true);
+                    }
+                    if msg.get("text").and_then(|v| v.as_str()).is_none() {
+                        msg["text"] = json!(text);
+                    }
+                    let guard = cache.write().await;
+                    Some(guard.apply_live_message(&msg).await?)
                 } else {
                     None
                 }

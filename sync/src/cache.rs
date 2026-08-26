@@ -64,7 +64,33 @@ impl MessageCache {
         )
         .execute(&pool)
         .await?;
-        Ok(Self { pool })
+        let cache = Self { pool };
+        cache.repair_message_projections().await?;
+        Ok(cache)
+    }
+
+    async fn repair_message_projections(&self) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE messages
+            SET
+              chat_id = COALESCE(
+                CAST(json_extract(raw_json, '$.chat_id') AS INTEGER),
+                chat_id
+              ),
+              created_at = COALESCE(json_extract(raw_json, '$.created_at'), created_at),
+              is_from_me = CASE
+                WHEN json_extract(raw_json, '$.is_from_me') = 1 THEN 1
+                WHEN json_extract(raw_json, '$.is_from_me') = 0 THEN 0
+                ELSE is_from_me
+              END
+            WHERE (chat_id = 0 AND json_extract(raw_json, '$.chat_id') IS NOT NULL)
+               OR (created_at IS NULL AND json_extract(raw_json, '$.created_at') IS NOT NULL)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn upsert_chat(&self, chat: &Value) -> Result<()> {
@@ -93,58 +119,22 @@ impl MessageCache {
 
     pub async fn upsert_message(&self, msg: &Value) -> Result<()> {
         let id = msg["id"].as_i64().unwrap_or(0);
-        let chat_id = msg["chat_id"].as_i64().unwrap_or(0);
-        let raw = serde_json::to_string(msg)?;
-        sqlx::query(
-            r#"INSERT INTO messages (id, chat_id, guid, sender, sender_name, text, created_at, is_from_me, raw_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(id) DO UPDATE SET text=excluded.text, raw_json=excluded.raw_json"#,
-        )
-        .bind(id)
-        .bind(chat_id)
-        .bind(msg["guid"].as_str())
-        .bind(msg["sender"].as_str())
-        .bind(msg["sender_name"].as_str())
-        .bind(msg["text"].as_str())
-        .bind(msg["created_at"].as_str())
-        .bind(if msg["is_from_me"].as_bool().unwrap_or(false) { 1 } else { 0 })
-        .bind(&raw)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let existing = load_raw_json(&self.pool, id).await?;
+        persist_message(&self.pool, &merge_message(existing, msg)).await
     }
 
     pub async fn apply_live_message(&self, msg: &Value) -> Result<Applied> {
         let id = msg["id"].as_i64().unwrap_or(0);
-        let chat_id = msg["chat_id"].as_i64().unwrap_or(0);
-        let created_at = msg["created_at"].as_str();
-        let is_from_me = msg["is_from_me"].as_bool().unwrap_or(false);
-        let raw = serde_json::to_string(msg)?;
-
         let mut tx = self.pool.begin().await?;
 
-        let is_new = sqlx::query("SELECT id FROM messages WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .is_none();
+        let existing = load_raw_json(&mut *tx, id).await?;
+        let is_new = existing.is_none();
+        let merged = merge_message(existing, msg);
+        persist_message(&mut *tx, &merged).await?;
 
-        sqlx::query(
-            r#"INSERT INTO messages (id, chat_id, guid, sender, sender_name, text, created_at, is_from_me, raw_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(id) DO UPDATE SET text=excluded.text, raw_json=excluded.raw_json"#,
-        )
-        .bind(id)
-        .bind(chat_id)
-        .bind(msg["guid"].as_str())
-        .bind(msg["sender"].as_str())
-        .bind(msg["sender_name"].as_str())
-        .bind(msg["text"].as_str())
-        .bind(created_at)
-        .bind(if is_from_me { 1 } else { 0 })
-        .bind(&raw)
-        .execute(&mut *tx)
-        .await?;
+        let chat_id = merged["chat_id"].as_i64().unwrap_or(0);
+        let created_at = merged["created_at"].as_str();
+        let is_from_me = merged["is_from_me"].as_bool().unwrap_or(false);
 
         let chat_row = sqlx::query("SELECT raw_json FROM chats WHERE id = ?")
             .bind(chat_id)
@@ -183,7 +173,7 @@ impl MessageCache {
 
         tx.commit().await?;
         Ok(Applied {
-            message: msg.clone(),
+            message: merged,
             chat,
             is_new,
         })
@@ -293,6 +283,82 @@ impl MessageCache {
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+}
+
+async fn load_raw_json<'e, E>(exec: E, id: i64) -> Result<Option<Value>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let row = sqlx::query("SELECT raw_json FROM messages WHERE id = ?")
+        .bind(id)
+        .fetch_optional(exec)
+        .await?;
+    match row {
+        None => Ok(None),
+        Some(row) => {
+            let s: String = row.get("raw_json");
+            Ok(Some(serde_json::from_str(&s)?))
+        }
+    }
+}
+
+async fn persist_message<'e, E>(exec: E, msg: &Value) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let raw = serde_json::to_string(msg)?;
+    sqlx::query(
+        r#"INSERT INTO messages (id, chat_id, guid, sender, sender_name, text, created_at, is_from_me, raw_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             chat_id=excluded.chat_id,
+             guid=excluded.guid,
+             sender=excluded.sender,
+             sender_name=excluded.sender_name,
+             text=excluded.text,
+             created_at=excluded.created_at,
+             is_from_me=excluded.is_from_me,
+             raw_json=excluded.raw_json"#,
+    )
+    .bind(msg["id"].as_i64().unwrap_or(0))
+    .bind(msg["chat_id"].as_i64().unwrap_or(0))
+    .bind(msg["guid"].as_str())
+    .bind(msg["sender"].as_str())
+    .bind(msg["sender_name"].as_str())
+    .bind(msg["text"].as_str())
+    .bind(msg["created_at"].as_str())
+    .bind(if msg["is_from_me"].as_bool().unwrap_or(false) {
+        1
+    } else {
+        0
+    })
+    .bind(&raw)
+    .execute(exec)
+    .await?;
+    Ok(())
+}
+
+fn merge_message(existing: Option<Value>, incoming: &Value) -> Value {
+    let mut out = existing
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(incoming_obj) = incoming.as_object() else {
+        return incoming.clone();
+    };
+    let obj = out.as_object_mut().expect("merged message is an object");
+    for (k, v) in incoming_obj {
+        if v.is_null() {
+            continue;
+        }
+        if k == "chat_id" && v.as_i64().unwrap_or(0) == 0 {
+            continue;
+        }
+        if k == "created_at" && v.as_str().is_none_or(|s| s.is_empty()) {
+            continue;
+        }
+        obj.insert(k.clone(), v.clone());
+    }
+    out
 }
 
 fn later_timestamp(existing: Option<&str>, incoming: Option<&str>) -> Option<String> {
@@ -417,5 +483,126 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["id"], 10);
         assert_eq!(messages[0]["text"], "orphan");
+    }
+
+    #[tokio::test]
+    async fn apply_live_message_repairs_stub_columns_from_later_full_event() {
+        let dir = tempdir().unwrap();
+        let cache = MessageCache::open(&dir.path().join("cache.db"))
+            .await
+            .unwrap();
+        cache
+            .upsert_chat(&serde_json::json!({
+                "id": 2,
+                "name": "Test",
+                "identifier": "+1",
+                "service": "iMessage",
+                "last_message_at": "2026-01-01T00:00:00Z",
+                "unread_count": 0
+            }))
+            .await
+            .unwrap();
+
+        cache
+            .apply_live_message(&serde_json::json!({
+                "id": 163692,
+                "guid": "67FD80FB-C6AF-46DF-86E3-85D10B796911",
+                "text": "Testing"
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            cache.list_messages(2, 10, None).await.unwrap().is_empty(),
+            "thin send result must not be listed under the real chat yet"
+        );
+
+        cache
+            .apply_live_message(&serde_json::json!({
+                "id": 163692,
+                "chat_id": 2,
+                "guid": "67FD80FB-C6AF-46DF-86E3-85D10B796911",
+                "text": "Testing",
+                "created_at": "2026-08-26T04:57:12.799Z",
+                "is_from_me": true
+            }))
+            .await
+            .unwrap();
+
+        let messages = cache.list_messages(2, 10, None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["text"], "Testing");
+        assert_eq!(messages[0]["chat_id"], 2);
+        assert_eq!(messages[0]["is_from_me"], true);
+        assert_eq!(messages[0]["created_at"], "2026-08-26T04:57:12.799Z");
+    }
+
+    #[tokio::test]
+    async fn open_repairs_projected_columns_from_raw_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache.db");
+        let cache = MessageCache::open(&path).await.unwrap();
+        cache
+            .apply_live_message(&serde_json::json!({
+                "id": 163692,
+                "guid": "abc",
+                "text": "Testing"
+            }))
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE messages SET raw_json = ? WHERE id = 163692",
+        )
+        .bind(r#"{"id":163692,"chat_id":2,"guid":"abc","text":"Testing","created_at":"2026-08-26T04:57:12.799Z","is_from_me":true}"#)
+        .execute(cache.pool())
+        .await
+        .unwrap();
+        drop(cache);
+
+        let reopened = MessageCache::open(&path).await.unwrap();
+        let messages = reopened.list_messages(2, 10, None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["text"], "Testing");
+        assert_eq!(messages[0]["is_from_me"], true);
+    }
+
+    #[tokio::test]
+    async fn apply_live_message_thin_replay_does_not_clear_chat_id() {
+        let dir = tempdir().unwrap();
+        let cache = MessageCache::open(&dir.path().join("cache.db"))
+            .await
+            .unwrap();
+        cache
+            .upsert_chat(&serde_json::json!({
+                "id": 2,
+                "name": "Test",
+                "identifier": "+1",
+                "service": "iMessage",
+                "last_message_at": "2026-01-01T00:00:00Z",
+                "unread_count": 0
+            }))
+            .await
+            .unwrap();
+        cache
+            .apply_live_message(&serde_json::json!({
+                "id": 10,
+                "chat_id": 2,
+                "text": "Testing",
+                "created_at": "2026-08-26T04:57:12.799Z",
+                "is_from_me": true
+            }))
+            .await
+            .unwrap();
+        cache
+            .apply_live_message(&serde_json::json!({
+                "id": 10,
+                "text": "Testing"
+            }))
+            .await
+            .unwrap();
+        let messages = cache.list_messages(2, 10, None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["chat_id"], 2);
+        assert_eq!(messages[0]["is_from_me"], true);
     }
 }
