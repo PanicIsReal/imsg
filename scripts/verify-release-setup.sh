@@ -13,10 +13,12 @@ need() {
 }
 
 need .github/workflows/release.yml
+need .github/workflows/ci.yml
 need packaging/arch/PKGBUILD
 need scripts/codesign-notarize.sh
 need scripts/package-mac.sh
 need scripts/package-linux.sh
+need scripts/assert-dist-asset.sh
 need tui/src/App.tsx
 
 if ! grep -q "kind: 'ask-ssh'" tui/src/App.tsx && ! grep -q 'kind: "ask-ssh"' tui/src/App.tsx; then
