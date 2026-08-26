@@ -60,10 +60,26 @@ pub fn pairing_code_valid(config: &Config) -> bool {
     true
 }
 
+/// Enroll must read the ticket from disk. The listen config is a clone from serve start.
+pub fn merge_live_ticket(listen: &Config, disk: &Config) -> Config {
+    let mut live = listen.clone();
+    live.pairing_code = disk.pairing_code.clone();
+    live.pairing_code_expires_at = disk.pairing_code_expires_at;
+    live
+}
+
+fn live_pairing_config(listen: &Config) -> Config {
+    match Config::load() {
+        Ok(disk) => merge_live_ticket(listen, &disk),
+        Err(_) => listen.clone(),
+    }
+}
+
 pub fn rotate_pairing_code(config: &mut Config) -> String {
     let code = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
     config.pairing_code = Some(code.clone());
-    config.pairing_code_expires_at = Some(Utc::now() + chrono::Duration::seconds(CODE_TTL.as_secs() as i64));
+    config.pairing_code_expires_at =
+        Some(Utc::now() + chrono::Duration::seconds(CODE_TTL.as_secs() as i64));
     code
 }
 
@@ -102,18 +118,18 @@ async fn enroll_handler(
             .into_response();
     }
 
-    if !pairing_code_valid(&state.config) {
+    let ticket = live_pairing_config(&state.config);
+    if !pairing_code_valid(&ticket) {
         return (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "pairing code expired or not configured; run imsg-bridge pair --rotate on Mac"
-                    .into(),
+                error: "pairing code expired or not configured. Run imsg setup on the Mac.".into(),
             }),
         )
             .into_response();
     }
 
-    let expected = state.config.pairing_code.as_deref().unwrap_or("");
+    let expected = ticket.pairing_code.as_deref().unwrap_or("");
     if !constant_time_eq(expected, req.pairing_code.trim()) {
         record_attempt(&state, &peer).await;
         return (
@@ -152,10 +168,7 @@ async fn enroll_handler(
             };
 
             let bridge_host = bridge_hostname(&state.config);
-            let bridge_url = format!(
-                "wss://{}:{}/ws",
-                bridge_host, state.config.port
-            );
+            let bridge_url = format!("wss://{}:{}/ws", bridge_host, state.config.port);
 
             info!("paired client '{client_name}' from {peer}");
             (
@@ -264,5 +277,19 @@ mod tests {
         assert!(constant_time_eq("abcd1234", "abcd1234"));
         assert!(!constant_time_eq("abcd1234", "abcd1235"));
         assert!(!constant_time_eq("short", "longer"));
+    }
+
+    #[test]
+    fn enroll_uses_disk_ticket_not_serve_clone() {
+        let mut listen = Config::default();
+        listen.pairing_code = Some("oldcode1".into());
+        listen.pairing_code_expires_at = Some(Utc::now() - chrono::Duration::seconds(60));
+        let mut disk = listen.clone();
+        disk.pairing_code = Some("newcode2".into());
+        disk.pairing_code_expires_at = Some(Utc::now() + chrono::Duration::seconds(900));
+        let live = merge_live_ticket(&listen, &disk);
+        assert_eq!(live.pairing_code.as_deref(), Some("newcode2"));
+        assert!(pairing_code_valid(&live));
+        assert!(!pairing_code_valid(&listen));
     }
 }
