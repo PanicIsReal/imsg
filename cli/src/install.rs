@@ -12,7 +12,7 @@ pub struct InstallResult {
     pub plugin_installed: bool,
 }
 
-pub async fn install(plugin: Option<PathBuf>, json: bool) -> Result<()> {
+pub fn apply(plugin: Option<PathBuf>) -> Result<InstallResult> {
     let platform = info::detect();
     let imsg = info::imsg_path()?;
     let mut plugin_installed = false;
@@ -33,20 +33,24 @@ pub async fn install(plugin: Option<PathBuf>, json: bool) -> Result<()> {
         Role::Unknown => anyhow::bail!("unsupported platform: {}", platform.os),
     };
 
-    let result = InstallResult {
+    Ok(InstallResult {
         role: platform.role,
         service,
         plugin_installed,
-    };
+    })
+}
+
+pub async fn install(plugin: Option<PathBuf>, json: bool) -> Result<()> {
+    let result = apply(plugin)?;
+    let platform = info::detect();
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
         println!("Installed {}", result.service);
-        if plugin_installed {
+        if result.plugin_installed {
             println!("Plugin installed to {:?}", platform.config_paths.plugin_dir);
         }
-        println!("Start with: imsg {} run", if platform.role == Role::Mac { "bridge serve" } else { "sync" });
     }
     Ok(())
 }
@@ -176,11 +180,20 @@ done
         fs::create_dir_all(parent)?;
     }
     fs::write(&plist_path, plist)?;
-    Command::new("launchctl")
+    let loaded = Command::new("launchctl")
         .args(["load", "-w"])
         .arg(&plist_path)
         .status()
         .context("launchctl load")?;
+    if !loaded.success() {
+        let listed = Command::new("launchctl")
+            .args(["list", "com.panic.imsg-bridge"])
+            .status()
+            .context("launchctl list")?;
+        if !listed.success() {
+            anyhow::bail!("launchctl load failed and com.panic.imsg-bridge is not listed");
+        }
+    }
     Ok(())
 }
 

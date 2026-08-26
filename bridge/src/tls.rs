@@ -13,9 +13,10 @@ pub struct TlsMaterial {
     pub data_dir: PathBuf,
 }
 
-pub fn init_certs(data_dir: &Path) -> Result<TlsMaterial> {
+pub fn init_certs(data_dir: &Path, bind: &str) -> Result<TlsMaterial> {
     fs::create_dir_all(data_dir)?;
     let ca_path = data_dir.join("ca.pem");
+    let ca_key_path = data_dir.join("ca-key.pem");
     let cert_path = data_dir.join("server.pem");
     let key_path = data_dir.join("server-key.pem");
     let clients_dir = data_dir.join("clients");
@@ -34,15 +35,24 @@ pub fn init_certs(data_dir: &Path) -> Result<TlsMaterial> {
         let ca_pem = ca_cert.pem();
 
         let server_kp = rcgen::KeyPair::generate_for(alg)?;
-        let server_params =
-            rcgen::CertificateParams::new(vec!["imsg-bridge.local".to_string()])?;
+        let mut sans = vec!["imsg-bridge.local".to_string(), "localhost".to_string()];
+        if !bind.is_empty() && bind != "0.0.0.0" {
+            sans.push(bind.to_string());
+        }
+        if let Ok(host) = hostname::get()
+            .and_then(|h| h.into_string().map_err(|_| std::io::Error::other("hostname")))
+        {
+            if !sans.contains(&host) {
+                sans.push(host);
+            }
+        }
+        let server_params = rcgen::CertificateParams::new(sans)?;
         let server_cert = server_params.signed_by(&server_kp, &issuer)?;
-        let server_pem = server_cert.pem();
-        let server_key = server_kp.serialize_pem();
 
         fs::write(&ca_path, &ca_pem)?;
-        fs::write(&cert_path, server_pem)?;
-        fs::write(&key_path, server_key)?;
+        fs::write(&ca_key_path, ca_kp.serialize_pem())?;
+        fs::write(&cert_path, server_cert.pem())?;
+        fs::write(&key_path, server_kp.serialize_pem())?;
     }
 
     load_server_config(data_dir)
@@ -81,6 +91,36 @@ pub fn load_server_config(data_dir: &Path) -> Result<TlsMaterial> {
     })
 }
 
+/// Pairing enrollment is server-auth only (no client cert).
+pub fn load_enroll_tls_config(data_dir: &Path) -> Result<ServerConfig> {
+    let cert_pem = fs::read_to_string(data_dir.join("server.pem"))?;
+    let key_pem = fs::read_to_string(data_dir.join("server-key.pem"))?;
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .context("parse enroll cert")?;
+    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
+        .context("parse enroll key")?
+        .ok_or_else(|| anyhow::anyhow!("no private key"))?;
+    ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("enroll tls config")
+}
+
+pub fn sign_client_csr(data_dir: &Path, name: &str, csr_pem: &str) -> Result<String> {
+    let ca_pem = fs::read_to_string(data_dir.join("ca.pem")).context("read ca")?;
+    let ca_key_pem = fs::read_to_string(data_dir.join("ca-key.pem")).context("read ca key")?;
+    let ca_kp = rcgen::KeyPair::from_pem(&ca_key_pem).context("parse ca key")?;
+    let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_pem, &ca_kp).context("ca issuer")?;
+    let csr = rcgen::CertificateSigningRequestParams::from_pem(csr_pem).context("parse csr")?;
+    let cert = csr.signed_by(&issuer).context("sign csr")?;
+    let pem = cert.pem();
+    let clients_dir = data_dir.join("clients");
+    fs::create_dir_all(&clients_dir)?;
+    fs::write(clients_dir.join(format!("{name}.pem")), &pem)?;
+    Ok(pem)
+}
+
 pub fn import_client_cert(data_dir: &Path, name: &str, cert_pem: &str) -> Result<PathBuf> {
     let clients_dir = data_dir.join("clients");
     fs::create_dir_all(&clients_dir)?;
@@ -99,10 +139,9 @@ pub fn client_allowed(data_dir: &Path, peer_certs: &[CertificateDer<'_>]) -> boo
     }
     for entry in entries.flatten() {
         if let Ok(text) = fs::read_to_string(entry.path()) {
-            let stored: Vec<CertificateDer<'static>> =
-                rustls_pemfile::certs(&mut text.as_bytes())
-                    .filter_map(|r| r.ok())
-                    .collect();
+            let stored: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut text.as_bytes())
+                .filter_map(|r| r.ok())
+                .collect();
             for peer in peer_certs {
                 for client in &stored {
                     if peer == client {

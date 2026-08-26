@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build linux imsg
+        run: cargo build --release -p imsg-cli
+      - name: Package
+        run: ./scripts/package-linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/imsg-linux-x86_64.tar.gz*
+
+  mac:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: oven-sh/setup-bun@v2
+      - name: Build mac imsg
+        run: cargo build --release -p imsg-cli --target aarch64-apple-darwin
+      - name: Compile TUI
+        working-directory: tui
+        run: |
+          bun install
+          bun run compile
+      - name: Package
+        run: ./scripts/package-mac.sh
+        env:
+          IMSG_BIN: target/aarch64-apple-darwin/release/imsg
+          IMSG_TUI_BIN: tui/imsg-tui
+      - name: Codesign
+        run: ./scripts/codesign-notarize.sh "dist/imsg-macos-aarch64/Imsg Setup.app"
+        env:
+          DEVELOPER_ID_CERT_P12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          NOTARY_KEYCHAIN_PROFILE: ${{ secrets.NOTARY_KEYCHAIN_PROFILE }}
+      - name: Repack
+        run: |
+          tar -C dist -czf dist/imsg-macos-aarch64.tar.gz imsg-macos-aarch64
+          (cd dist && shasum -a 256 imsg-macos-aarch64.tar.gz > imsg-macos-aarch64.tar.gz.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: dist/imsg-macos-aarch64.tar.gz*
+
+  publish:
+    needs: [linux, mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/imsg-linux-x86_64.tar.gz
+            dist/imsg-linux-x86_64.tar.gz.sha256
+            dist/imsg-macos-aarch64.tar.gz
+            dist/imsg-macos-aarch64.tar.gz.sha256
+            packaging/arch/PKGBUILD

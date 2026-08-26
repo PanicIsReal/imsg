@@ -1,0 +1,14 @@
+pkgname=imsg
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Omarchy iMessage bridge (Linux sync client)"
+arch=('x86_64')
+url="https://github.com/PanicIsReal/imsg"
+license=('MIT')
+depends=()
+source=("https://github.com/PanicIsReal/imsg/releases/download/v${pkgver}/imsg-linux-x86_64.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  install -Dm755 "${srcdir}/imsg" "${pkgdir}/usr/bin/imsg"
+}
