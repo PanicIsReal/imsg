@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import "js/ImsgClient.js" as ImsgClient
+import "js/Store.js" as Store
 
 Item {
   id: root
@@ -32,6 +33,47 @@ Item {
     if (resolved !== "") return resolved
     var home = Quickshell.env("HOME") || ""
     return home + "/.config/omarchy/plugins/io.github.panic.imessage/bin/request.py"
+  }
+  readonly property string subscribeScript: {
+    var resolved = ImsgClient.scriptPath(Qt.resolvedUrl("bin/subscribe.py"))
+    if (resolved !== "") return resolved
+    var home = Quickshell.env("HOME") || ""
+    return home + "/.config/omarchy/plugins/io.github.panic.imessage/bin/subscribe.py"
+  }
+
+  function ingest(line) {
+    var frame = ImsgClient.parseResponse(line)
+    if (!frame) return
+    if (frame.type === "res" && frame.ok && frame.result) {
+      applyPatch(Store.applySnapshot(frame.result))
+      root.connected = true
+      root.syncing = false
+      if (root.openChatId > 0) root.loadMessages(root.openChatId, null)
+      return
+    }
+    if (frame.type === "event") {
+      applyPatch(Store.applyEvent({
+        chats: root.chats,
+        messages: root.messages,
+        openChatId: root.openChatId
+      }, frame))
+    }
+  }
+
+  function applyPatch(patch) {
+    if (!patch) return
+    if (patch.chats !== undefined) root.chats = patch.chats
+    if (patch.messages !== undefined) root.messages = patch.messages
+    if (patch.unreadCount !== undefined) root.unreadCount = patch.unreadCount
+    if (patch.link !== undefined) {
+      root.bridgeConnected = ImsgClient.flag(patch.link.bridge_connected)
+      root.databaseReady = ImsgClient.flag(patch.link.database_ready)
+      root.lastError = ImsgClient.friendlyError(patch.link.last_error)
+      root.statusKnown = true
+    }
+    if (patch.notify) {
+      root.notifyInbound(patch.notify.sender, patch.notify.preview, patch.notify.chatId)
+    }
   }
 
   function refreshChats() {
@@ -190,8 +232,33 @@ Item {
     }
   }
 
+  Process {
+    id: streamProc
+    running: false
+    command: []
+    stdout: SplitParser {
+      onRead: function(data) { root.ingest(data) }
+    }
+    onExited: function() { streamRetry.restart() }
+  }
+
+  Timer {
+    id: streamRetry
+    interval: 2000
+    repeat: false
+    onTriggered: {
+      if (root.subscribeScript === "") return
+      streamProc.command = ImsgClient.streamCommand(root.subscribeScript)
+      streamProc.running = true
+    }
+  }
+
   Component.onCompleted: {
     refreshChats()
     refreshStatus()
+    if (root.subscribeScript !== "") {
+      streamProc.command = ImsgClient.streamCommand(root.subscribeScript)
+      streamProc.running = true
+    }
   }
 }

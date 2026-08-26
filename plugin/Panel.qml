@@ -53,6 +53,7 @@ Panel {
   }
 
   function close() {
+    if (imsg) imsg.openChatId = 0
     root.controller.hide()
   }
 

@@ -19,6 +19,10 @@ function command(script, method, params) {
   return ["/usr/bin/python3", script, method, JSON.stringify(params || {})]
 }
 
+function streamCommand(script) {
+  return ["/usr/bin/python3", script]
+}
+
 function flag(value) {
   return value === true || value === 1 || value === "true"
 }

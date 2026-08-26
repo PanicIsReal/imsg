@@ -1,4 +1,4 @@
-use crate::cache::MessageCache;
+use crate::cache::{ChatRow, MessageCache};
 use crate::config::SyncConfig;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -147,9 +147,22 @@ async fn connect_and_sync_inner(
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(Envelope::Event { topic, payload }) = Envelope::parse_line(&text) {
                             if topic == "message" {
-                                let guard = cache.write().await;
-                                guard.upsert_message(&payload).await?;
-                                let _ = events.send(Envelope::Event { topic, payload });
+                                let applied = {
+                                    let guard = cache.write().await;
+                                    guard.apply_live_message(&payload).await?
+                                };
+                                let chat = match applied.chat {
+                                    ChatRow::Updated(v) => Some(v),
+                                    ChatRow::Unknown { .. } => None,
+                                };
+                                let _ = events.send(Envelope::Event {
+                                    topic: "sync.message".into(),
+                                    payload: json!({
+                                        "message": applied.message,
+                                        "chat": chat,
+                                        "is_new": applied.is_new,
+                                    }),
+                                });
                             }
                         }
                     }
@@ -190,19 +203,16 @@ pub async fn bridge_request(config: &SyncConfig, method: &str, params: Value) ->
     rpc_call(&mut write, &mut read, method, params).await
 }
 
-async fn rpc_call<W, R>(
-    write: &mut W,
-    read: &mut R,
-    method: &str,
-    params: Value,
-) -> Result<Value>
+async fn rpc_call<W, R>(write: &mut W, read: &mut R, method: &str, params: Value) -> Result<Value>
 where
     W: SinkExt<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
     R: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
     static ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let id = ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string();
+    let id = ID
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .to_string();
     let req = Envelope::Req {
         id: id.clone(),
         method: method.into(),
@@ -212,15 +222,23 @@ where
     while let Some(msg) = read.next().await {
         let msg = msg?;
         if let Message::Text(text) = msg {
-            if let Ok(Envelope::Res { id: rid, ok: true, result: Some(result), .. }) =
-                Envelope::parse_line(&text)
+            if let Ok(Envelope::Res {
+                id: rid,
+                ok: true,
+                result: Some(result),
+                ..
+            }) = Envelope::parse_line(&text)
             {
                 if rid == id {
                     return Ok(result);
                 }
             }
-            if let Ok(Envelope::Res { id: rid, ok: false, error, .. }) =
-                Envelope::parse_line(&text)
+            if let Ok(Envelope::Res {
+                id: rid,
+                ok: false,
+                error,
+                ..
+            }) = Envelope::parse_line(&text)
             {
                 if rid == id {
                     anyhow::bail!("{:?}", error);
@@ -239,8 +257,8 @@ fn build_tls(config: &SyncConfig) -> Result<ClientConfig> {
     }
     let cert_pem = std::fs::read(&config.client_cert_path).context("read client cert")?;
     let key_pem = std::fs::read(&config.client_key_path).context("read client key")?;
-    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_pem.as_slice())
-        .collect::<Result<Vec<_>, _>>()?;
+    let certs: Vec<_> =
+        rustls_pemfile::certs(&mut cert_pem.as_slice()).collect::<Result<Vec<_>, _>>()?;
     let key = rustls_pemfile::private_key(&mut key_pem.as_slice())?
         .ok_or_else(|| anyhow::anyhow!("no client key"))?;
 

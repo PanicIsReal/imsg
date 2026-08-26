@@ -71,7 +71,7 @@ async fn request(method: &str, params: &str) -> Result<()> {
 async fn run_daemon() -> Result<()> {
     let config = config::SyncConfig::load()?;
     let cache = cache::MessageCache::open(&config.cache_path).await?;
-    let (event_tx, event_rx) = tokio::sync::broadcast::channel(256);
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(256);
     let cache = std::sync::Arc::new(tokio::sync::RwLock::new(cache));
 
     let client_cache = std::sync::Arc::clone(&cache);
@@ -83,7 +83,7 @@ async fn run_daemon() -> Result<()> {
         }
     });
 
-    socket_server::serve(config.socket_path, cache, event_rx).await
+    socket_server::serve(config.socket_path, cache, event_tx).await
 }
 
 async fn status() -> Result<()> {
