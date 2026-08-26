@@ -175,23 +175,12 @@ async fn write_env(
 async fn snapshot(cache: &Arc<RwLock<MessageCache>>) -> Result<Value> {
     let guard = cache.read().await;
     let chats = guard.list_chats(50).await?;
-    let bridge_connected = guard
-        .get_meta("bridge_connected")
-        .await?
-        .is_some_and(|v| v == "true");
-    let database_ready = guard
-        .get_meta("database_ready")
-        .await?
-        .is_some_and(|v| v == "true");
-    let last_error = guard.get_meta("last_error").await?.unwrap_or_default();
-    Ok(json!({
-        "chats": chats,
-        "bridge_connected": bridge_connected,
-        "database_ready": database_ready,
-        "last_error": last_error,
-        "contacts": "unknown",
-        "protocol": imsg_proto::PROTOCOL_VERSION
-    }))
+    let mut snap = guard.link_snapshot().await?;
+    if let Some(obj) = snap.as_object_mut() {
+        obj.insert("chats".into(), json!(chats));
+        obj.insert("protocol".into(), json!(imsg_proto::PROTOCOL_VERSION));
+    }
+    Ok(snap)
 }
 
 fn live_event(applied: crate::cache::Applied) -> Envelope {
@@ -219,23 +208,20 @@ async fn dispatch(
     match method {
         "status" => {
             let guard = cache.read().await;
-            let bridge_connected = guard
-                .get_meta("bridge_connected")
-                .await?
-                .is_some_and(|v| v == "true");
-            let database_ready = guard
-                .get_meta("database_ready")
-                .await?
-                .is_some_and(|v| v == "true");
-            let last_error = guard.get_meta("last_error").await?.unwrap_or_default();
-            Ok(json!({
-                "connected": true,
-                "bridge_connected": bridge_connected,
-                "database_ready": database_ready,
-                "last_error": last_error,
-                "protocol": imsg_proto::PROTOCOL_VERSION
-            }))
+            let mut snap = guard.link_snapshot().await?;
+            if let Some(obj) = snap.as_object_mut() {
+                obj.insert("connected".into(), json!(true));
+                obj.insert("protocol".into(), json!(imsg_proto::PROTOCOL_VERSION));
+            }
+            Ok(snap)
         }
+        "contacts.authorize" => Ok(uplink
+            .call_timeout(
+                "contacts.authorize",
+                json!({}),
+                std::time::Duration::from_secs(135),
+            )
+            .await?),
         "messages.send" => {
             let chat_id = params["chat_id"].as_i64().context("chat_id required")?;
             let text = params["text"].as_str().context("text required")?;
@@ -418,6 +404,50 @@ mod tests {
                 assert_eq!(payload["message"]["id"], 9);
             }
             other => panic!("expected sync.message event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn status_and_snapshot_include_contacts_from_meta() {
+        let (_dir, sock, _events) = boot().await;
+        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        write_req(&mut stream, "status", json!({})).await;
+        let mut lines = BufReader::new(stream).lines();
+        let line = timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let env = Envelope::parse_line(&line).unwrap();
+        match env {
+            Envelope::Res {
+                ok: true, result, ..
+            } => {
+                assert_eq!(result.unwrap()["contacts"], "unknown");
+            }
+            other => panic!("expected status res, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn contacts_authorize_without_uplink_is_link_down() {
+        let (_dir, sock, _events) = boot().await;
+        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        write_req(&mut stream, "contacts.authorize", json!({})).await;
+        let mut lines = BufReader::new(stream).lines();
+        let line = timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let env = Envelope::parse_line(&line).unwrap();
+        match env {
+            Envelope::Res {
+                ok: false, error, ..
+            } => {
+                assert_eq!(error.unwrap().code, "link_down");
+            }
+            other => panic!("expected link_down, got {other:?}"),
         }
     }
 }

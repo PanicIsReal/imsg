@@ -18,6 +18,7 @@ Item {
   property bool statusKnown: false
   property string lastError: ""
   property string sendError: ""
+  property string contacts: "unknown"
 
   readonly property bool cacheReady: chats && chats.length > 0
   readonly property string linkState: {
@@ -28,6 +29,7 @@ Item {
     if (bridgeConnected) return "mac-locked"
     return "mac-down"
   }
+  readonly property string contactsState: root.contacts || "unknown"
   readonly property string requestScript: {
     var resolved = ImsgClient.scriptPath(Qt.resolvedUrl("bin/request.py"))
     if (resolved !== "") return resolved
@@ -70,6 +72,9 @@ Item {
       root.databaseReady = ImsgClient.flag(patch.link.database_ready)
       root.lastError = ImsgClient.friendlyError(patch.link.last_error)
       root.statusKnown = true
+      if (patch.link.contacts !== undefined && patch.link.contacts !== null && String(patch.link.contacts).length > 0) {
+        root.contacts = String(patch.link.contacts)
+      }
     }
     if (patch.notify) {
       root.notifyInbound(patch.notify.sender, patch.notify.preview, patch.notify.chatId)
@@ -95,6 +100,13 @@ Item {
     historyProc.beforeCursor = before || ""
     historyProc.command = ImsgClient.command(requestScript, "messages.history", params)
     historyProc.running = true
+  }
+
+  function requestContactsAccess() {
+    if (requestScript === "" || contactsProc.running) return
+    root.contacts = "prompting"
+    contactsProc.command = ImsgClient.command(requestScript, "contacts.authorize", {})
+    contactsProc.running = true
   }
 
   function sendMessage(chatId, text) {
@@ -174,6 +186,27 @@ Item {
           root.databaseReady = ImsgClient.flag(res.result.database_ready)
           root.lastError = ImsgClient.friendlyError(res.result.last_error)
           root.statusKnown = true
+          if (res.result.contacts) root.contacts = String(res.result.contacts)
+        }
+      }
+    }
+  }
+
+  Process {
+    id: contactsProc
+    running: false
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var res = ImsgClient.parseResponse(text)
+        if (!res) return
+        if (res.ok && res.result && res.result.outcome === "granted" && res.result.names_visible) {
+          root.contacts = "granted"
+        } else if (res.ok && res.result && res.result.outcome === "prompting") {
+          root.contacts = "prompting"
+        } else if (res.ok) {
+          root.contacts = "unavailable"
         }
       }
     }

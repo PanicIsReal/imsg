@@ -8,7 +8,8 @@ function applySnapshot(result) {
     link: {
       bridge_connected: !!(result && result.bridge_connected),
       database_ready: !!(result && result.database_ready),
-      last_error: (result && result.last_error) ? result.last_error : ""
+      last_error: (result && result.last_error) ? result.last_error : "",
+      contacts: (result && result.contacts) ? result.contacts : "unknown"
     }
   }
 }
@@ -19,6 +20,9 @@ function applyEvent(state, event) {
   if (event.topic === "sync.chats") {
     var chats = event.payload && event.payload.chats ? event.payload.chats : []
     return { chats: chats, unreadCount: totalUnread(chats) }
+  }
+  if (event.topic === "sync.link") {
+    return { link: event.payload || {} }
   }
   return {}
 }

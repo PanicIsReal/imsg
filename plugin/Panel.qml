@@ -193,10 +193,39 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
+          Item {
+            id: contactsRow
+            anchors.top: statusText.bottom
+            anchors.topMargin: visible ? Style.space(4) : 0
+            width: parent.width
+            height: visible ? Style.space(28) : 0
+            visible: imsg && (imsg.contactsState === "unavailable" || imsg.contactsState === "prompting")
+            clip: true
+
+            WidgetButton {
+              anchors.fill: parent
+              visible: imsg && imsg.contactsState === "unavailable"
+              bar: root.bar
+              text: "Show contact names…"
+              onPressed: function() { imsg.requestContactsAccess() }
+            }
+            Text {
+              anchors.fill: parent
+              visible: imsg && imsg.contactsState === "prompting"
+              text: "Click Allow on your Mac to show contact names."
+              color: root.barForeground
+              opacity: 0.8
+              wrapMode: Text.WordWrap
+              elide: Text.ElideRight
+              font.pixelSize: Style.font.caption
+              verticalAlignment: Text.AlignVCenter
+            }
+          }
+
           Text {
             id: threadTitle
-            anchors.top: statusText.bottom
-            anchors.topMargin: statusText.visible ? Style.space(4) : 0
+            anchors.top: contactsRow.bottom
+            anchors.topMargin: contactsRow.visible || statusText.visible ? Style.space(4) : 0
             width: parent.width
             height: root.currentTitle.length > 0 ? Style.space(22) : 0
             visible: height > 0

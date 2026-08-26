@@ -8,9 +8,16 @@ pub struct Config {
     pub bind: String,
     pub port: u16,
     pub imsg_path: String,
+    /// Ghostty is the FDA/TCC parent of the running bridge.
+    #[serde(default = "default_ghostty_path")]
+    pub ghostty_path: String,
     pub enable_send: bool,
     pub data_dir: PathBuf,
     pub pairing_code: Option<String>,
+}
+
+fn default_ghostty_path() -> String {
+    "/Applications/Ghostty.app".into()
 }
 
 impl Default for Config {
@@ -22,6 +29,7 @@ impl Default for Config {
             bind: "127.0.0.1".into(),
             port: 18789,
             imsg_path: "imsg".into(),
+            ghostty_path: default_ghostty_path(),
             enable_send: false,
             data_dir,
             pairing_code: None,

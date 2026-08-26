@@ -254,6 +254,28 @@ impl MessageCache {
         Ok(row.map(|r| r.get::<String, _>("value")))
     }
 
+    pub async fn link_snapshot(&self) -> Result<Value> {
+        let bridge_connected = self
+            .get_meta("bridge_connected")
+            .await?
+            .is_some_and(|v| v == "true");
+        let database_ready = self
+            .get_meta("database_ready")
+            .await?
+            .is_some_and(|v| v == "true");
+        let last_error = self.get_meta("last_error").await?.unwrap_or_default();
+        let contacts = self
+            .get_meta("contacts")
+            .await?
+            .unwrap_or_else(|| "unknown".into());
+        Ok(serde_json::json!({
+            "bridge_connected": bridge_connected,
+            "database_ready": database_ready,
+            "last_error": last_error,
+            "contacts": contacts,
+        }))
+    }
+
     pub async fn chat_count(&self) -> Result<i64> {
         let row = sqlx::query("SELECT COUNT(*) as c FROM chats")
             .fetch_one(&self.pool)

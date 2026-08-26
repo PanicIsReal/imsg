@@ -59,6 +59,35 @@ async fn set_link_state(
     Ok(())
 }
 
+fn contacts_meta(state: ContactsState) -> &'static str {
+    match state {
+        ContactsState::Unknown => "unknown",
+        ContactsState::Unavailable => "unavailable",
+        ContactsState::Prompting => "prompting",
+        ContactsState::Granted => "granted",
+    }
+}
+
+async fn persist_contacts(cache: &Arc<RwLock<MessageCache>>, state: ContactsState) -> Result<()> {
+    cache
+        .write()
+        .await
+        .set_meta("contacts", contacts_meta(state))
+        .await
+}
+
+async fn publish_sync_link(
+    cache: &Arc<RwLock<MessageCache>>,
+    events: &broadcast::Sender<Envelope>,
+) -> Result<()> {
+    let payload = cache.read().await.link_snapshot().await?;
+    let _ = events.send(Envelope::Event {
+        topic: "sync.link".into(),
+        payload,
+    });
+    Ok(())
+}
+
 fn link_error_code(err: &impl ToString) -> String {
     let s = err.to_string();
     if s.contains("Database unavailable") || s.contains("Full Disk Access") {
@@ -291,6 +320,10 @@ async fn apply_bridge_event(
             }
         }
         BridgeEvent::Contacts(state) => {
+            persist_contacts(cache, state).await?;
+            if let Err(e) = publish_sync_link(cache, events).await {
+                warn!("publish sync.link after contacts: {e}");
+            }
             if contacts.take_rising_grant(state) {
                 if let Err(e) =
                     reload_chats(uplink, config, cache, events, "contacts_granted").await

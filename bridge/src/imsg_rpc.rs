@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{broadcast, Mutex, oneshot};
-use tracing::{debug, warn};
+use tokio::sync::{broadcast, oneshot, Mutex};
+use tracing::{debug, info, warn};
 
 static REQ_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -25,17 +25,7 @@ impl ImsgRpc {
     }
 
     pub async fn spawn(imsg_path: &str) -> Result<Arc<Self>> {
-        let mut child = Command::new(imsg_path)
-            .arg("rpc")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .context("spawn imsg rpc")?;
-
-        let stdin = child.stdin.take().context("imsg stdin")?;
-        let stdout = child.stdout.take().context("imsg stdout")?;
-
+        let (child, stdin, stdout) = launch_child(imsg_path).await?;
         let (events_tx, _) = broadcast::channel(256);
         let rpc = Arc::new(Self {
             stdin: Arc::new(Mutex::new(stdin)),
@@ -43,15 +33,62 @@ impl ImsgRpc {
             child: Arc::new(Mutex::new(child)),
             events: events_tx,
         });
+        rpc.spawn_read_loop(stdout);
+        Ok(rpc)
+    }
 
-        let reader_rpc = Arc::clone(&rpc);
+    fn spawn_read_loop(self: &Arc<Self>, stdout: ChildStdout) {
+        let reader = Arc::clone(self);
         tokio::spawn(async move {
-            if let Err(e) = reader_rpc.read_loop(stdout).await {
+            if let Err(e) = reader.read_loop(stdout).await {
                 warn!("imsg rpc read loop ended: {e}");
             }
         });
+    }
 
-        Ok(rpc)
+    /// Kills and relaunches the child, then re-establishes the watch
+    /// subscription. Needed when a Contacts grant lands after the child
+    /// started and the child's CNContactStore was created while denied.
+    pub async fn respawn(self: &Arc<Self>, imsg_path: &str) -> Result<()> {
+        {
+            let mut child = self.child.lock().await;
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+        let stale = {
+            let mut pending = self.pending.lock().await;
+            pending.drain().collect::<Vec<_>>()
+        };
+        for (_, tx) in stale {
+            let _ = tx.send(json!({"error": {"message": "imsg rpc respawned"}}));
+        }
+        let (child, stdin, stdout) = launch_child(imsg_path).await?;
+        *self.stdin.lock().await = stdin;
+        *self.child.lock().await = child;
+        self.spawn_read_loop(stdout);
+        self.ensure_watch().await
+    }
+
+    /// Extracted from `spawn_watch_forwarder` so `respawn` reuses the retry loop.
+    pub async fn ensure_watch(&self) -> Result<()> {
+        let mut last_err = None;
+        for _ in 0..6 {
+            match self
+                .call("watch.subscribe", json!({"debounce_ms": 500}))
+                .await
+            {
+                Ok(_) => {
+                    info!("watch subscription active");
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("watch.subscribe failed: {e}");
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("watch.subscribe failed")))
     }
 
     async fn read_loop(self: Arc<Self>, stdout: ChildStdout) -> Result<()> {
@@ -108,6 +145,19 @@ impl ImsgRpc {
     pub async fn status(&self) -> Result<Value> {
         self.call("status", json!({})).await
     }
+}
+
+async fn launch_child(imsg_path: &str) -> Result<(Child, ChildStdin, ChildStdout)> {
+    let mut child = Command::new(imsg_path)
+        .arg("rpc")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("spawn imsg rpc")?;
+    let stdin = child.stdin.take().context("imsg stdin")?;
+    let stdout = child.stdout.take().context("imsg stdout")?;
+    Ok((child, stdin, stdout))
 }
 
 pub fn bridge_method_to_imsg(method: &str) -> Option<&'static str> {

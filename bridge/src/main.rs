@@ -1,5 +1,6 @@
 mod attachments;
 mod config;
+mod contacts;
 mod imsg_rpc;
 mod server;
 mod tls;
@@ -73,7 +74,10 @@ fn cmd_init(bind: String, port: u16) -> Result<()> {
     config.save()?;
     tls::init_certs(&config.data_dir)?;
     println!("Initialized at {:?}", config.data_dir);
-    println!("Pairing code: {}", config.pairing_code.as_deref().unwrap_or("?"));
+    println!(
+        "Pairing code: {}",
+        config.pairing_code.as_deref().unwrap_or("?")
+    );
     println!("Run: imsg-bridge serve");
     Ok(())
 }
@@ -112,7 +116,9 @@ async fn cmd_status() -> Result<()> {
     match rpc.status().await {
         Ok(status) => println!("{}", serde_json::to_string_pretty(&status)?),
         Err(_) => {
-            let chats = rpc.call("chats.list", serde_json::json!({"limit": 1})).await?;
+            let chats = rpc
+                .call("chats.list", serde_json::json!({"limit": 1}))
+                .await?;
             println!("{}", serde_json::to_string_pretty(&chats)?);
         }
     }
