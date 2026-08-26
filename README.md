@@ -1,6 +1,8 @@
-# imsg — Omarchy iMessage Plugin
+# imsg
 
-Tailscale/LAN-only iMessage bridge for [Omarchy](https://omarchy.org). Read-only by default.
+Tailscale or LAN iMessage bridge for [Omarchy](https://omarchy.org).
+
+The bar plugin is published at https://github.com/PanicIsReal/omarchy-imessage. This repository is the Mac bridge and the Linux sync daemon that plugin talks to.
 
 ## Architecture
 
@@ -14,44 +16,47 @@ Tailscale/LAN-only iMessage bridge for [Omarchy](https://omarchy.org). Read-only
 
 ### Mac
 
-```bash
+```sh
 brew install steipete/tap/imsg
 cargo install --path bridge
 ```
 
-Grant **Full Disk Access** to `imsg-bridge` and `imsg` in System Settings → Privacy & Security.
+Grant Full Disk Access to Ghostty, then run the bridge from that terminal.
 
-Optional: **Contacts** for name resolution.
+Optional: Contacts access so chats show names.
 
 ### Linux (Omarchy)
 
-```bash
+```sh
 cargo install --path sync
 ```
 
 ## Setup
 
-### 1. Initialize bridge (Mac)
+### 1. Initialize the bridge on the Mac
 
-```bash
-imsg-bridge init --bind 127.0.0.1   # use Tailscale IP in production
-imsg-bridge pair                    # shows pairing code + CA path
+```sh
+imsg-bridge init --bind 127.0.0.1
+imsg-bridge pair
 ```
 
-Import client cert after generating on Linux:
+Use a Tailscale IP in production, not loopback.
 
-```bash
+Import the Linux client cert after you generate it:
+
+```sh
 imsg-bridge clients-import omarchy-laptop --cert ~/client.pem
 ```
 
-### 2. Run bridge
+### 2. Run the bridge
 
-```bash
+```sh
 imsg-bridge serve
-# or: launchctl load deploy/mac/imsg-bridge.plist
 ```
 
-### 3. Configure sync (Linux)
+Or load `deploy/mac/imsg-bridge.plist` with `launchctl`.
+
+### 3. Configure sync on Linux
 
 Create `~/.config/imsg-sync/config.toml`:
 
@@ -62,30 +67,30 @@ client_cert_path = "/home/you/.local/share/omarchy-imessage/client.pem"
 client_key_path = "/home/you/.local/share/omarchy-imessage/client-key.pem"
 ```
 
-```bash
+```sh
 imsg-sync run
-# or: systemctl --user enable --now deploy/linux/imsg-sync.service
 ```
 
-### 4. Install Omarchy plugin
+Or enable `deploy/linux/imsg-sync.service` with systemd.
 
-```bash
-omarchy plugin add /path/to/imsg/plugin --enable
-# or copy plugin/ to ~/.config/omarchy/plugins/io.github.panic.imessage/
-omarchy-shell shell rescanPlugins
+### 4. Install the Omarchy plugin
+
+```sh
+omarchy plugin add https://github.com/PanicIsReal/omarchy-imessage.git --enable
 ```
+
+You can also copy `plugin/` from this repository to `~/.config/omarchy/plugins/io.github.panic.imessage/`.
 
 ## Security
 
-- Bridge binds to Tailscale/LAN only (refuses `0.0.0.0`)
-- mTLS + client cert allowlist
-- Read-only API allowlist (no `send` in v1)
-- Plugin talks to local Unix socket only
-- See `docs/tailscale-acl.json` for example ACLs
+- The bridge binds to Tailscale or LAN only. It refuses `0.0.0.0`.
+- Clients use mTLS and a cert allowlist.
+- The plugin talks to a local Unix socket only. It never connects to the Mac.
+- See `docs/tailscale-acl.json` for example ACLs.
 
 ## Development
 
-```bash
+```sh
 cargo test
 ./scripts/pr0-prototype.sh
 ```
