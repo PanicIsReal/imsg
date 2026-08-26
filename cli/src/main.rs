@@ -146,6 +146,7 @@ pub enum SyncCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    imsg_bridge::install_crypto_provider();
     let cli = Cli::parse();
     let json = cli.json;
 
