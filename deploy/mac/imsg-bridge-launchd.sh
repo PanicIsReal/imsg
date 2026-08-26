@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
-BRIDGE="/Users/panic/.cargo/bin/imsg"
+WRAPPER="${HOME}/.local/libexec/imsg-bridge-serve"
 APP="/Applications/Ghostty.app"
+PORT=18789
 
-# Status-only TCC probe. Reading CNContactStore.authorizationStatus does not prompt.
 PROBE_SRC="$(cd "$(dirname "$0")" && pwd)/contacts-probe/main.swift"
 PROBE_BIN="${HOME}/.local/libexec/imsg-contacts-probe"
 if [[ ! -x "$PROBE_BIN" && -f "$PROBE_SRC" ]]; then
@@ -11,11 +11,26 @@ if [[ ! -x "$PROBE_BIN" && -f "$PROBE_SRC" ]]; then
   /usr/bin/swiftc -O -framework Contacts -o "$PROBE_BIN" "$PROBE_SRC" || true
 fi
 
-if ! /usr/bin/pgrep -fq "$BRIDGE bridge serve"; then
-  /usr/bin/open -na "$APP" --args -e "$BRIDGE bridge serve"
+if [[ ! -x "$WRAPPER" ]]; then
+  mkdir -p "$(dirname "$WRAPPER")"
+  /bin/cp "$(cd "$(dirname "$0")" && pwd)/imsg-bridge-serve.sh" "$WRAPPER"
+  chmod +x "$WRAPPER"
+fi
+
+serve_up() {
+  /usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+if ! serve_up; then
+  /usr/bin/open -na "$APP" --args -e "$WRAPPER"
   sleep 3
 fi
 
-while /usr/bin/pgrep -fq "$BRIDGE bridge serve"; do
+if ! serve_up; then
+  sleep 30
+  exit 1
+fi
+
+while serve_up; do
   sleep 5
 done
