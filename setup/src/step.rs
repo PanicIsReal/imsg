@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, TcpStream, ToSocketAddrs};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -83,6 +83,8 @@ fn lsof_listening(port: u16) -> bool {
     for bin in ["/usr/sbin/lsof", "/usr/bin/lsof", "lsof"] {
         if Command::new(bin)
             .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
