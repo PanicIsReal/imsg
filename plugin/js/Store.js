@@ -126,8 +126,8 @@ function setupGuide(s) {
   return {
     phase: "needs-mac",
     title: "This machine is not linked",
-    body: "Pair Omarchy with the Mac. On the Mac run a pairing rotate, then run the command below here.",
-    hint: "imsg setup pair <code> --host <mac-tailscale-ip>",
+    body: "The Mac needs Homebrew imsg and a running bridge. After that, pair from here with imsg setup pair <code> --host <mac-tailscale-ip>.",
+    hint: "brew install steipete/tap/imsg",
     actionKind: ""
   }
 }

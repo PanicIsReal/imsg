@@ -21,6 +21,8 @@ brew install steipete/tap/imsg
 cargo install --path bridge
 ```
 
+`imsg-bridge serve` runs that brew install when Homebrew is present and the formula is missing.
+
 Grant Full Disk Access to Ghostty, then run the bridge from that terminal.
 
 Optional: Contacts access so chats show names.
