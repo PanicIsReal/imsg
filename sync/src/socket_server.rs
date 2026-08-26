@@ -1,4 +1,5 @@
 use crate::cache::{ChatRow, MessageCache};
+use crate::uplink::{UplinkError, UplinkHandle};
 use anyhow::{Context, Result};
 use imsg_proto::Envelope;
 use serde_json::{json, Value};
@@ -9,10 +10,16 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::info;
 
+enum ClientMode {
+    Oneshot,
+    Streaming(broadcast::Receiver<Envelope>),
+}
+
 pub async fn serve(
     socket_path: impl AsRef<Path>,
     cache: Arc<RwLock<MessageCache>>,
     events: broadcast::Sender<Envelope>,
+    uplink: UplinkHandle,
 ) -> Result<()> {
     let socket_path = socket_path.as_ref();
     if let Some(parent) = socket_path.parent() {
@@ -26,8 +33,9 @@ pub async fn serve(
         let (stream, _) = listener.accept().await?;
         let cache = Arc::clone(&cache);
         let events = events.clone();
+        let uplink = uplink.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, cache, events).await {
+            if let Err(e) = handle_client(stream, cache, events, uplink).await {
                 tracing::warn!("client error: {e}");
             }
         });
@@ -38,48 +46,54 @@ async fn handle_client(
     stream: UnixStream,
     cache: Arc<RwLock<MessageCache>>,
     events: broadcast::Sender<Envelope>,
+    uplink: UplinkHandle,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(writer));
     let mut lines = BufReader::new(reader).lines();
-    let mut sub: Option<broadcast::Receiver<Envelope>> = None;
+    let mut mode = ClientMode::Oneshot;
 
     loop {
-        if let Some(rx) = sub.as_mut() {
-            tokio::select! {
-                line = lines.next_line() => {
-                    let Some(line) = line? else { break };
-                    process_line(&line, &cache, &events, &writer).await?;
-                }
-                evt = rx.recv() => {
-                    match evt {
-                        Ok(env) => write_env(&writer, &env).await?,
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            let chats = cache.read().await.list_chats(50).await?;
-                            write_env(
-                                &writer,
-                                &Envelope::Event {
-                                    topic: "sync.chats".into(),
-                                    payload: json!({"reason": "events_lagged", "chats": chats}),
-                                },
-                            )
-                            .await?;
+        match &mut mode {
+            ClientMode::Streaming(rx) => {
+                tokio::select! {
+                    line = lines.next_line() => {
+                        let Some(line) = line? else { break };
+                        process_line(&line, &cache, &events, &uplink, &writer).await?;
+                    }
+                    evt = rx.recv() => {
+                        match evt {
+                            Ok(env) => write_env(&writer, &env).await?,
+                            Err(broadcast::error::RecvError::Lagged(_)) => {
+                                let chats = cache.read().await.list_chats(50).await?;
+                                write_env(
+                                    &writer,
+                                    &Envelope::Event {
+                                        topic: "sync.chats".into(),
+                                        payload: json!({"reason": "events_lagged", "chats": chats}),
+                                    },
+                                )
+                                .await?;
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
                         }
-                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }
-        } else {
-            let Some(line) = lines.next_line().await? else { break };
-            if subscribe_requested(&line)? {
-                sub = Some(events.subscribe());
-                let snap = snapshot(&cache).await?;
-                let env = Envelope::parse_line(line.trim())?;
-                if let Envelope::Req { id, .. } = env {
-                    write_env(&writer, &ok_res(&id, snap)).await?;
+            ClientMode::Oneshot => {
+                let Some(line) = lines.next_line().await? else {
+                    break;
+                };
+                if subscribe_requested(&line)? {
+                    mode = ClientMode::Streaming(events.subscribe());
+                    let snap = snapshot(&cache).await?;
+                    let env = Envelope::parse_line(line.trim())?;
+                    if let Envelope::Req { id, .. } = env {
+                        write_env(&writer, &ok_res(&id, snap)).await?;
+                    }
+                } else {
+                    process_line(&line, &cache, &events, &uplink, &writer).await?;
                 }
-            } else {
-                process_line(&line, &cache, &events, &writer).await?;
             }
         }
     }
@@ -101,6 +115,7 @@ async fn process_line(
     line: &str,
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
+    uplink: &UplinkHandle,
     writer: &Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
 ) -> Result<()> {
     let line = line.trim();
@@ -114,18 +129,24 @@ async fn process_line(
             write_env(writer, &ok_res(&id, snap)).await?;
             return Ok(());
         }
-        let result = dispatch(cache, events, &method, params).await;
+        let result = dispatch(cache, events, uplink, &method, params).await;
         let reply = match result {
             Ok(v) => ok_res(&id, v),
-            Err(e) => Envelope::Res {
-                id,
-                ok: false,
-                result: None,
-                error: Some(imsg_proto::ErrorBody {
-                    code: "error".into(),
-                    message: e.to_string(),
-                }),
-            },
+            Err(e) => {
+                let code = e
+                    .downcast_ref::<UplinkError>()
+                    .map(UplinkError::code)
+                    .unwrap_or("error");
+                Envelope::Res {
+                    id,
+                    ok: false,
+                    result: None,
+                    error: Some(imsg_proto::ErrorBody {
+                        code: code.into(),
+                        message: e.to_string(),
+                    }),
+                }
+            }
         };
         write_env(writer, &reply).await?;
     }
@@ -146,7 +167,8 @@ async fn write_env(
     env: &Envelope,
 ) -> Result<()> {
     let mut w = writer.lock().await;
-    w.write_all(format!("{}\n", env.to_line()?).as_bytes()).await?;
+    w.write_all(format!("{}\n", env.to_line()?).as_bytes())
+        .await?;
     Ok(())
 }
 
@@ -190,6 +212,7 @@ fn live_event(applied: crate::cache::Applied) -> Envelope {
 async fn dispatch(
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
+    uplink: &UplinkHandle,
     method: &str,
     params: Value,
 ) -> Result<Value> {
@@ -216,13 +239,9 @@ async fn dispatch(
         "messages.send" => {
             let chat_id = params["chat_id"].as_i64().context("chat_id required")?;
             let text = params["text"].as_str().context("text required")?;
-            let config = crate::config::SyncConfig::load()?;
-            let result = crate::client::bridge_request(
-                &config,
-                "send",
-                json!({"chat_id": chat_id, "text": text}),
-            )
-            .await?;
+            let result = uplink
+                .call("send", json!({"chat_id": chat_id, "text": text}))
+                .await?;
             let applied = {
                 let guard = cache.write().await;
                 if let Some(msg) = result.get("message") {
@@ -282,7 +301,11 @@ mod tests {
     use tokio::net::UnixStream;
     use tokio::time::timeout;
 
-    async fn boot() -> (tempfile::TempDir, std::path::PathBuf, broadcast::Sender<Envelope>) {
+    async fn boot() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        broadcast::Sender<Envelope>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("imsg-sync.sock");
         let db = dir.path().join("cache.db");
@@ -301,7 +324,7 @@ mod tests {
         let serve_tx = tx.clone();
         let serve_sock = sock.clone();
         tokio::spawn(async move {
-            let _ = serve(serve_sock, cache, serve_tx).await;
+            let _ = serve(serve_sock, cache, serve_tx, UplinkHandle::default()).await;
         });
         for _ in 0..100 {
             if sock.exists() {
@@ -337,7 +360,9 @@ mod tests {
             .unwrap();
         let env = Envelope::parse_line(&line).unwrap();
         match env {
-            Envelope::Res { ok: true, result, .. } => {
+            Envelope::Res {
+                ok: true, result, ..
+            } => {
                 let chats = result.unwrap()["chats"].as_array().unwrap().clone();
                 assert_eq!(chats.len(), 1);
             }
@@ -349,7 +374,10 @@ mod tests {
             payload: json!({"is_new": true}),
         });
         let extra = timeout(Duration::from_millis(150), lines.next_line()).await;
-        assert!(extra.is_err(), "oneshot connection must not be written an event");
+        assert!(
+            extra.is_err(),
+            "oneshot connection must not be written an event"
+        );
     }
 
     #[tokio::test]
@@ -365,7 +393,9 @@ mod tests {
             .unwrap();
         let env = Envelope::parse_line(&snap).unwrap();
         match env {
-            Envelope::Res { ok: true, result, .. } => {
+            Envelope::Res {
+                ok: true, result, ..
+            } => {
                 let result = result.unwrap();
                 assert_eq!(result["chats"].as_array().unwrap().len(), 1);
             }

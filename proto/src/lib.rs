@@ -1,5 +1,9 @@
 //! imsg-bridge/v1 wire protocol types.
 
+pub mod event;
+
+pub use event::{BridgeEvent, ContactsState};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -91,5 +95,6 @@ mod tests {
     fn allowlist_blocks_send() {
         assert!(!Envelope::method_allowed("send"));
         assert!(Envelope::method_allowed("status"));
+        assert!(!Envelope::method_allowed("contacts.authorize"));
     }
 }

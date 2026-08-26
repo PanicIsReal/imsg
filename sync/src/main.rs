@@ -2,6 +2,7 @@ mod cache;
 mod client;
 mod config;
 mod socket_server;
+mod uplink;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -73,17 +74,21 @@ async fn run_daemon() -> Result<()> {
     let cache = cache::MessageCache::open(&config.cache_path).await?;
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel(256);
     let cache = std::sync::Arc::new(tokio::sync::RwLock::new(cache));
+    let uplink = uplink::UplinkHandle::default();
 
     let client_cache = std::sync::Arc::clone(&cache);
     let client_config = config.clone();
     let client_tx = event_tx.clone();
+    let client_uplink = uplink.clone();
     tokio::spawn(async move {
-        if let Err(e) = client::bridge_loop(client_config, client_cache, client_tx).await {
+        if let Err(e) =
+            client::bridge_loop(client_config, client_cache, client_tx, client_uplink).await
+        {
             tracing::error!("bridge loop: {e}");
         }
     });
 
-    socket_server::serve(config.socket_path, cache, event_tx).await
+    socket_server::serve(config.socket_path, cache, event_tx, uplink).await
 }
 
 async fn status() -> Result<()> {

@@ -1,23 +1,22 @@
-use crate::cache::{ChatRow, MessageCache};
+use crate::cache::{Applied, ChatRow, MessageCache};
 use crate::config::SyncConfig;
-use anyhow::{Context, Result};
-use futures_util::{SinkExt, StreamExt};
+use crate::uplink::{Uplink, UplinkHandle, UplinkSession};
+use anyhow::Result;
+use imsg_proto::event::{BridgeEvent, ContactsState};
 use imsg_proto::Envelope;
-use rustls::{ClientConfig, RootCertStore};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async_tls_with_config, Connector};
-use tracing::{info, warn};
+use tokio::sync::{broadcast, RwLock};
+use tracing::{debug, info, warn};
 
 pub async fn bridge_loop(
     config: SyncConfig,
     cache: Arc<RwLock<MessageCache>>,
-    events: tokio::sync::broadcast::Sender<Envelope>,
+    events: broadcast::Sender<Envelope>,
+    handle: UplinkHandle,
 ) -> Result<()> {
     loop {
-        match connect_and_sync(&config, &cache, &events).await {
+        match connect_and_sync(&config, &cache, &events, &handle).await {
             Ok(()) => warn!("bridge connection closed, reconnecting"),
             Err(e) => warn!("bridge error: {e}, retry in 5s"),
         }
@@ -28,9 +27,11 @@ pub async fn bridge_loop(
 async fn connect_and_sync(
     config: &SyncConfig,
     cache: &Arc<RwLock<MessageCache>>,
-    events: &tokio::sync::broadcast::Sender<Envelope>,
+    events: &broadcast::Sender<Envelope>,
+    handle: &UplinkHandle,
 ) -> Result<()> {
-    let result = connect_and_sync_inner(config, cache, events).await;
+    let result = connect_and_sync_inner(config, cache, events, handle).await;
+    handle.detach().await;
     let _ = set_link_state(cache, false, false, "").await;
     result
 }
@@ -67,24 +68,51 @@ fn link_error_code(err: &impl ToString) -> String {
     }
 }
 
-async fn prefetch_cache<W, R>(
-    write: &mut W,
-    read: &mut R,
+#[derive(Default)]
+struct ContactsLatch {
+    last: ContactsState,
+}
+
+impl ContactsLatch {
+    /// Rising-edge only: `Unavailable → Granted` is actionable.
+    /// `Unknown → Granted` on connect is not — prefetch already ran.
+    fn take_rising_grant(&mut self, state: ContactsState) -> bool {
+        let rising = self.last == ContactsState::Unavailable && state == ContactsState::Granted;
+        self.last = state;
+        rising
+    }
+}
+
+#[derive(Default)]
+struct GenerationLatch {
+    last: Option<String>,
+}
+
+impl GenerationLatch {
+    /// First greeting is not a rotation; only a later different generation is.
+    fn changed(&mut self, generation: &str) -> bool {
+        match &self.last {
+            None => {
+                self.last = Some(generation.to_string());
+                false
+            }
+            Some(prev) if prev == generation => false,
+            Some(_) => {
+                self.last = Some(generation.to_string());
+                true
+            }
+        }
+    }
+}
+
+async fn prefetch_cache(
+    uplink: &Uplink,
     config: &SyncConfig,
     cache: &Arc<RwLock<MessageCache>>,
-) -> Result<()>
-where
-    W: SinkExt<Message> + Unpin,
-    W::Error: std::error::Error + Send + Sync + 'static,
-    R: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
-{
-    let chats = rpc_call(
-        write,
-        read,
-        "chats.list",
-        json!({"limit": config.prefetch_chats}),
-    )
-    .await?;
+) -> Result<()> {
+    let chats = uplink
+        .call("chats.list", json!({"limit": config.prefetch_chats}))
+        .await?;
     let list = chats
         .get("chats")
         .and_then(|v| v.as_array())
@@ -98,13 +126,12 @@ where
         let Some(id) = chat.get("id").and_then(|v| v.as_i64()) else {
             continue;
         };
-        let hist = rpc_call(
-            write,
-            read,
-            "messages.history",
-            json!({"chat_id": id, "limit": config.prefetch_messages}),
-        )
-        .await?;
+        let hist = uplink
+            .call(
+                "messages.history",
+                json!({"chat_id": id, "limit": config.prefetch_messages}),
+            )
+            .await?;
         if let Some(msgs) = hist.get("messages").and_then(|v| v.as_array()) {
             let guard = cache.write().await;
             for msg in msgs {
@@ -118,19 +145,29 @@ where
 async fn connect_and_sync_inner(
     config: &SyncConfig,
     cache: &Arc<RwLock<MessageCache>>,
-    events: &tokio::sync::broadcast::Sender<Envelope>,
+    events: &broadcast::Sender<Envelope>,
+    handle: &UplinkHandle,
 ) -> Result<()> {
-    let tls = build_tls(config)?;
-    let connector = Connector::Rustls(Arc::new(tls));
-    let (ws, _) = connect_async_tls_with_config(&config.bridge_url, None, false, Some(connector))
-        .await
-        .context("connect bridge")?;
+    let session = Uplink::connect(config).await?;
     info!("connected to bridge");
+    handle.attach(Arc::clone(&session.uplink)).await;
     set_link_state(cache, true, false, "").await?;
+    run_session(session, config, cache, events).await
+}
 
-    let (mut write, mut read) = ws.split();
+async fn run_session(
+    session: UplinkSession,
+    config: &SyncConfig,
+    cache: &Arc<RwLock<MessageCache>>,
+    events: &broadcast::Sender<Envelope>,
+) -> Result<()> {
+    let UplinkSession {
+        uplink,
+        events: mut bridge_events,
+        mut pump,
+    } = session;
 
-    match prefetch_cache(&mut write, &mut read, config, cache).await {
+    match prefetch_cache(&uplink, config, cache).await {
         Ok(()) => set_link_state(cache, true, true, "").await?,
         Err(e) => {
             warn!("prefetch failed, staying connected: {e}");
@@ -138,38 +175,32 @@ async fn connect_and_sync_inner(
         }
     }
 
+    let mut contacts = ContactsLatch::default();
+    let mut generation = GenerationLatch::default();
     let mut retry = tokio::time::interval(std::time::Duration::from_secs(30));
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         tokio::select! {
-            msg = read.next() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Ok(Envelope::Event { topic, payload }) = Envelope::parse_line(&text) {
-                            if topic == "message" {
-                                let applied = {
-                                    let guard = cache.write().await;
-                                    guard.apply_live_message(&payload).await?
-                                };
-                                let chat = match applied.chat {
-                                    ChatRow::Updated(v) => Some(v),
-                                    ChatRow::Unknown { .. } => None,
-                                };
-                                let _ = events.send(Envelope::Event {
-                                    topic: "sync.message".into(),
-                                    payload: json!({
-                                        "message": applied.message,
-                                        "chat": chat,
-                                        "is_new": applied.is_new,
-                                    }),
-                                });
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => return Err(e.into()),
-                }
+            result = &mut pump => {
+                return match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(e),
+                    Err(e) => Err(e.into()),
+                };
+            }
+            evt = bridge_events.recv() => {
+                let Some(evt) = evt else { break };
+                apply_bridge_event(
+                    evt,
+                    &uplink,
+                    config,
+                    cache,
+                    events,
+                    &mut contacts,
+                    &mut generation,
+                )
+                .await?;
             }
             _ = retry.tick() => {
                 let ready = cache
@@ -179,7 +210,7 @@ async fn connect_and_sync_inner(
                     .await?
                     .is_some_and(|v| v == "true");
                 if !ready {
-                    match prefetch_cache(&mut write, &mut read, config, cache).await {
+                    match prefetch_cache(&uplink, config, cache).await {
                         Ok(()) => set_link_state(cache, true, true, "").await?,
                         Err(e) => {
                             warn!("prefetch retry failed: {e}");
@@ -193,77 +224,126 @@ async fn connect_and_sync_inner(
     Ok(())
 }
 
-pub async fn bridge_request(config: &SyncConfig, method: &str, params: Value) -> Result<Value> {
-    let tls = build_tls(config)?;
-    let connector = Connector::Rustls(Arc::new(tls));
-    let (ws, _) = connect_async_tls_with_config(&config.bridge_url, None, false, Some(connector))
-        .await
-        .context("connect bridge")?;
-    let (mut write, mut read) = ws.split();
-    rpc_call(&mut write, &mut read, method, params).await
+fn sync_message_event(applied: Applied) -> Envelope {
+    let chat = match applied.chat {
+        ChatRow::Updated(v) => Some(v),
+        ChatRow::Unknown { .. } => None,
+    };
+    Envelope::Event {
+        topic: "sync.message".into(),
+        payload: json!({
+            "message": applied.message,
+            "chat": chat,
+            "is_new": applied.is_new,
+        }),
+    }
 }
 
-async fn rpc_call<W, R>(write: &mut W, read: &mut R, method: &str, params: Value) -> Result<Value>
-where
-    W: SinkExt<Message> + Unpin,
-    W::Error: std::error::Error + Send + Sync + 'static,
-    R: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
-{
-    static ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let id = ID
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        .to_string();
-    let req = Envelope::Req {
-        id: id.clone(),
-        method: method.into(),
-        params,
-    };
-    write.send(Message::Text(req.to_line()?.into())).await?;
-    while let Some(msg) = read.next().await {
-        let msg = msg?;
-        if let Message::Text(text) = msg {
-            if let Ok(Envelope::Res {
-                id: rid,
-                ok: true,
-                result: Some(result),
-                ..
-            }) = Envelope::parse_line(&text)
-            {
-                if rid == id {
-                    return Ok(result);
-                }
-            }
-            if let Ok(Envelope::Res {
-                id: rid,
-                ok: false,
-                error,
-                ..
-            }) = Envelope::parse_line(&text)
-            {
-                if rid == id {
-                    anyhow::bail!("{:?}", error);
+async fn reload_chats(
+    uplink: &Uplink,
+    config: &SyncConfig,
+    cache: &Arc<RwLock<MessageCache>>,
+    events: &broadcast::Sender<Envelope>,
+    reason: &str,
+) -> Result<()> {
+    let result = uplink
+        .call("chats.list", json!({"limit": config.prefetch_chats}))
+        .await?;
+    let list = result
+        .get("chats")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    {
+        let guard = cache.write().await;
+        for chat in &list {
+            guard.upsert_chat(chat).await?;
+        }
+    }
+    let _ = events.send(Envelope::Event {
+        topic: "sync.chats".into(),
+        payload: json!({"reason": reason, "chats": list}),
+    });
+    Ok(())
+}
+
+async fn apply_bridge_event(
+    evt: BridgeEvent,
+    uplink: &Uplink,
+    config: &SyncConfig,
+    cache: &Arc<RwLock<MessageCache>>,
+    events: &broadcast::Sender<Envelope>,
+    contacts: &mut ContactsLatch,
+    generation: &mut GenerationLatch,
+) -> Result<()> {
+    match evt {
+        BridgeEvent::Message(payload) => {
+            let applied = {
+                let guard = cache.write().await;
+                guard.apply_live_message(&payload).await?
+            };
+            let unknown = matches!(applied.chat, ChatRow::Unknown { .. });
+            let _ = events.send(sync_message_event(applied));
+            if unknown {
+                if let Err(e) = reload_chats(uplink, config, cache, events, "unknown_chat").await {
+                    warn!("reload chats after unknown chat: {e}");
                 }
             }
         }
+        BridgeEvent::Contacts(state) => {
+            if contacts.take_rising_grant(state) {
+                if let Err(e) =
+                    reload_chats(uplink, config, cache, events, "contacts_granted").await
+                {
+                    warn!("reload chats after contacts grant: {e}");
+                }
+            }
+        }
+        BridgeEvent::DbGeneration { generation: gen } => {
+            if generation.changed(&gen) {
+                match prefetch_cache(uplink, config, cache).await {
+                    Ok(()) => {
+                        set_link_state(cache, true, true, "").await?;
+                        if let Err(e) =
+                            reload_chats(uplink, config, cache, events, "db_generation_changed")
+                                .await
+                        {
+                            warn!("reload chats after db generation: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        warn!("prefetch after db generation failed: {e}");
+                        set_link_state(cache, true, false, &link_error_code(&e)).await?;
+                    }
+                }
+            }
+        }
+        BridgeEvent::Unknown { topic } => {
+            debug!(topic, "ignored bridge topic");
+        }
     }
-    anyhow::bail!("connection closed awaiting {method}")
+    Ok(())
 }
 
-fn build_tls(config: &SyncConfig) -> Result<ClientConfig> {
-    let mut roots = RootCertStore::empty();
-    let ca = std::fs::read(&config.ca_cert_path).context("read ca")?;
-    for cert in rustls_pemfile::certs(&mut ca.as_slice()) {
-        roots.add(cert?).context("add ca")?;
-    }
-    let cert_pem = std::fs::read(&config.client_cert_path).context("read client cert")?;
-    let key_pem = std::fs::read(&config.client_key_path).context("read client key")?;
-    let certs: Vec<_> =
-        rustls_pemfile::certs(&mut cert_pem.as_slice()).collect::<Result<Vec<_>, _>>()?;
-    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())?
-        .ok_or_else(|| anyhow::anyhow!("no client key"))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_client_auth_cert(certs, key)
-        .context("client tls")
+    #[test]
+    fn contacts_latch_only_fires_on_unavailable_to_granted() {
+        let mut latch = ContactsLatch::default();
+        assert!(!latch.take_rising_grant(ContactsState::Granted));
+        assert!(!latch.take_rising_grant(ContactsState::Unavailable));
+        assert!(latch.take_rising_grant(ContactsState::Granted));
+        assert!(!latch.take_rising_grant(ContactsState::Granted));
+    }
+
+    #[test]
+    fn generation_latch_ignores_connect_greeting() {
+        let mut latch = GenerationLatch::default();
+        assert!(!latch.changed("abc"));
+        assert!(!latch.changed("abc"));
+        assert!(latch.changed("def"));
+        assert!(!latch.changed("def"));
+    }
 }
