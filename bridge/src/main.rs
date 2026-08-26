@@ -1,6 +1,7 @@
 mod attachments;
 mod config;
 mod contacts;
+mod steipete;
 mod imsg_rpc;
 mod server;
 mod tls;

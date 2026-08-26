@@ -386,6 +386,9 @@ fn imsg_usable(path: &Path) -> bool {
 }
 
 pub fn resolve_imsg_path(imsg_path: &str) -> PathBuf {
+    if let Some(found) = crate::steipete::resolve_steipete_imsg(imsg_path) {
+        return found;
+    }
     let p = PathBuf::from(imsg_path);
     if p.is_absolute() {
         return p;

@@ -148,7 +148,8 @@ impl ImsgRpc {
 }
 
 async fn launch_child(imsg_path: &str) -> Result<(Child, ChildStdin, ChildStdout)> {
-    let mut child = Command::new(imsg_path)
+    let imsg_path = crate::steipete::ensure_steipete_imsg(imsg_path)?;
+    let mut child = Command::new(&imsg_path)
         .arg("rpc")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
