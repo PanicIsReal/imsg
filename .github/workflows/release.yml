@@ -17,26 +17,34 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
       - name: Build linux imsg
-        run: cargo build --release -p imsg-cli
+        run: cargo build --release -p imsg-cli --target x86_64-unknown-linux-gnu
       - name: Package
         run: ./scripts/package-linux.sh
+        env:
+          IMSG_BIN: target/x86_64-unknown-linux-gnu/release/imsg
+      - name: Assert archive
+        run: ./scripts/assert-dist-asset.sh linux
       - uses: actions/upload-artifact@v4
         with:
           name: linux
           path: dist/imsg-linux-x86_64.tar.gz*
 
   mac:
-    runs-on: macos-14
+    runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
@@ -66,6 +74,8 @@ jobs:
         run: |
           tar -C dist -czf dist/imsg-macos-aarch64.tar.gz imsg-macos-aarch64
           (cd dist && shasum -a 256 imsg-macos-aarch64.tar.gz > imsg-macos-aarch64.tar.gz.sha256)
+      - name: Assert archive
+        run: ./scripts/assert-dist-asset.sh mac
       - uses: actions/upload-artifact@v4
         with:
           name: mac
@@ -74,10 +84,11 @@ jobs:
   publish:
     needs: [linux, mac]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Require v tag
         env:
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           case "$TAG" in
             v*) ;;
@@ -88,7 +99,7 @@ jobs:
           esac
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           name: linux
@@ -97,9 +108,13 @@ jobs:
         with:
           name: mac
           path: dist
+      - name: Assert archives
+        run: |
+          ./scripts/assert-dist-asset.sh linux
+          ./scripts/assert-dist-asset.sh mac
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |

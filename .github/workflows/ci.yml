@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Build linux imsg
+        run: cargo build --release -p imsg-cli --target x86_64-unknown-linux-gnu
+      - name: Package
+        run: ./scripts/package-linux.sh
+        env:
+          IMSG_BIN: target/x86_64-unknown-linux-gnu/release/imsg
+      - name: Assert archive
+        run: ./scripts/assert-dist-asset.sh linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: imsg-linux-x86_64
+          path: dist/imsg-linux-x86_64.tar.gz*
+
+  mac:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: oven-sh/setup-bun@v2
+      - name: Build mac imsg
+        run: cargo build --release -p imsg-cli --target aarch64-apple-darwin
+      - name: Compile TUI
+        working-directory: tui
+        run: |
+          bun install
+          bun run compile
+      - name: Package
+        run: ./scripts/package-mac.sh
+        env:
+          IMSG_BIN: target/aarch64-apple-darwin/release/imsg
+          IMSG_TUI_BIN: tui/imsg-tui
+      - name: Assert archive
+        run: ./scripts/assert-dist-asset.sh mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: imsg-macos-aarch64
+          path: dist/imsg-macos-aarch64.tar.gz*
