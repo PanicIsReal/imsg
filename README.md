@@ -29,7 +29,7 @@ https://github.com/PanicIsReal/imsg/releases
 - `imsg-macos-aarch64.tar.gz` — `imsg`, `imsg-tui`, and `Imsg Setup.app`
 - `imsg-linux-x86_64.tar.gz` — `imsg` for Omarchy
 
-Push an annotated or lightweight tag that matches `v*` to origin. A tag such as `v0.1.0` runs `.github/workflows/release.yml` and publishes the assets listed above.
+Push a `v*` tag such as `v0.1.0` to origin. That runs `.github/workflows/release.yml` and publishes the assets listed above. If the tag is already on origin and no run started, open the release workflow in Actions and use **Run workflow** with that tag.
 
 ## Notes
 
