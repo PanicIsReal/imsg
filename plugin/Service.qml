@@ -19,6 +19,7 @@ Item {
   property string lastError: ""
   property string sendError: ""
   property string contacts: "unknown"
+  property var pendingNotify: null
 
   readonly property bool cacheReady: chats && chats.length > 0
   readonly property string linkState: {
@@ -131,8 +132,13 @@ Item {
   }
 
   function notifyInbound(sender, body, chatId) {
-    var safeBody = (body || "").replace(/'/g, "")
-    var safeSender = (sender || "iMessage").replace(/'/g, "")
+    var cmd = ImsgClient.notificationCommand(sender, body, chatId)
+    if (notifyProc.running) {
+      root.pendingNotify = cmd
+      return
+    }
+    notifyProc.command = cmd
+    notifyProc.running = true
   }
 
   Timer {
@@ -271,6 +277,18 @@ Item {
         root.sendError = ImsgClient.friendlyError(sendProc.stderrText.trim() || ("send failed (code " + exitCode + ")"))
       }
       sendProc.stderrText = ""
+    }
+  }
+
+  Process {
+    id: notifyProc
+    running: false
+    command: []
+    onExited: function() {
+      if (!root.pendingNotify) return
+      notifyProc.command = root.pendingNotify
+      root.pendingNotify = null
+      notifyProc.running = true
     }
   }
 

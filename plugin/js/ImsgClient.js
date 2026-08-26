@@ -23,6 +23,22 @@ function streamCommand(script) {
   return ["/usr/bin/python3", script]
 }
 
+function notificationCommand(sender, body, chatId) {
+  return [
+    "omarchy-notification-send",
+    "--app-name", "iMessage",
+    "--urgency", "normal",
+    "-g", "󰍩",
+    String(sender || "iMessage"),
+    String(body || ""),
+    "--exec",
+    "omarchy-shell",
+    "io.github.panic.imessage",
+    "openChat",
+    String(chatId || "0")
+  ]
+}
+
 function flag(value) {
   return value === true || value === 1 || value === "true"
 }

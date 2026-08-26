@@ -27,6 +27,16 @@ BarWidget {
     if (panelLoader.item) panelLoader.item.toggle()
   }
 
+  function openChat(chatId) {
+    var id = Number(chatId)
+    if (!panelLoader.item || !(id > 0)) {
+      root.open()
+      return
+    }
+    panelLoader.item.openChat(id)
+    panelLoader.item.open()
+  }
+
   function injectPanel() {
     if (!panelLoader.item) return
     panelLoader.item.bar = root.bar
@@ -84,6 +94,7 @@ BarWidget {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
+    function openChat(chatId: string): void { root.openChat(chatId) }
   }
 
   WidgetButton {
