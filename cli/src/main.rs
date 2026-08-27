@@ -94,6 +94,13 @@ pub enum SetupCommands {
         #[arg(long, default_value_t = 5)]
         timeout: u64,
     },
+    /// Point Linux sync at a BlueBubbles server
+    Connect {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        password: String,
+    },
 }
 
 #[derive(clap::Args, Clone)]

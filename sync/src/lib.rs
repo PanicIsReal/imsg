@@ -1,7 +1,9 @@
+pub mod bb;
 pub mod cache;
 pub mod client;
 pub mod commands;
 pub mod config;
+pub mod domain;
 pub mod socket_server;
 pub mod uplink;
 

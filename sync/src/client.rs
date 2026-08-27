@@ -1,13 +1,14 @@
+use crate::bb::BlueBubbles;
 use crate::cache::{Applied, ChatRow, MessageCache};
 use crate::config::SyncConfig;
-use crate::uplink::{Uplink, UplinkHandle, UplinkSession};
+use crate::domain::Message;
+use crate::uplink::UplinkHandle;
 use anyhow::Result;
-use imsg_proto::event::{BridgeEvent, ContactsState};
 use imsg_proto::Envelope;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 pub async fn bridge_loop(
     config: SyncConfig,
@@ -17,8 +18,8 @@ pub async fn bridge_loop(
 ) -> Result<()> {
     loop {
         match connect_and_sync(&config, &cache, &events, &handle).await {
-            Ok(()) => warn!("bridge connection closed, reconnecting"),
-            Err(e) => warn!("bridge error: {e}, retry in 5s"),
+            Ok(()) => warn!("bluebubbles connection closed, reconnecting"),
+            Err(e) => warn!("bluebubbles error: {e}, retry in 5s"),
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
@@ -59,35 +60,6 @@ async fn set_link_state(
     Ok(())
 }
 
-fn contacts_meta(state: ContactsState) -> &'static str {
-    match state {
-        ContactsState::Unknown => "unknown",
-        ContactsState::Unavailable => "unavailable",
-        ContactsState::Prompting => "prompting",
-        ContactsState::Granted => "granted",
-    }
-}
-
-async fn persist_contacts(cache: &Arc<RwLock<MessageCache>>, state: ContactsState) -> Result<()> {
-    cache
-        .write()
-        .await
-        .set_meta("contacts", contacts_meta(state))
-        .await
-}
-
-async fn publish_sync_link(
-    cache: &Arc<RwLock<MessageCache>>,
-    events: &broadcast::Sender<Envelope>,
-) -> Result<()> {
-    let payload = cache.read().await.link_snapshot().await?;
-    let _ = events.send(Envelope::Event {
-        topic: "sync.link".into(),
-        payload,
-    });
-    Ok(())
-}
-
 fn link_error_code(err: &impl ToString) -> String {
     let s = err.to_string();
     if s.contains("Database unavailable") || s.contains("Full Disk Access") {
@@ -97,75 +69,22 @@ fn link_error_code(err: &impl ToString) -> String {
     }
 }
 
-#[derive(Default)]
-struct ContactsLatch {
-    last: ContactsState,
-}
-
-impl ContactsLatch {
-    /// Rising-edge only: `Unavailable → Granted` is actionable.
-    /// `Unknown → Granted` on connect is not — prefetch already ran.
-    fn take_rising_grant(&mut self, state: ContactsState) -> bool {
-        let rising = self.last == ContactsState::Unavailable && state == ContactsState::Granted;
-        self.last = state;
-        rising
-    }
-}
-
-#[derive(Default)]
-struct GenerationLatch {
-    last: Option<String>,
-}
-
-impl GenerationLatch {
-    /// First greeting is not a rotation; only a later different generation is.
-    fn changed(&mut self, generation: &str) -> bool {
-        match &self.last {
-            None => {
-                self.last = Some(generation.to_string());
-                false
-            }
-            Some(prev) if prev == generation => false,
-            Some(_) => {
-                self.last = Some(generation.to_string());
-                true
-            }
-        }
-    }
-}
-
 async fn prefetch_cache(
-    uplink: &Uplink,
+    bb: &BlueBubbles,
     config: &SyncConfig,
     cache: &Arc<RwLock<MessageCache>>,
 ) -> Result<()> {
-    let chats = uplink
-        .call("chats.list", json!({"limit": config.prefetch_chats}))
-        .await?;
-    let list = chats
-        .get("chats")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    for chat in list {
-        {
-            let guard = cache.write().await;
-            guard.upsert_chat(&chat).await?;
-        }
-        let Some(id) = chat.get("id").and_then(|v| v.as_i64()) else {
-            continue;
-        };
-        let hist = uplink
-            .call(
-                "messages.history",
-                json!({"chat_id": id, "limit": config.prefetch_messages}),
-            )
+    let chats = bb.query_chats(config.prefetch_chats).await?;
+    for chat in chats {
+        let guard = cache.write().await;
+        guard.upsert_domain_chat(&chat).await?;
+        drop(guard);
+        let msgs = bb
+            .chat_messages(&chat.guid, config.prefetch_messages)
             .await?;
-        if let Some(msgs) = hist.get("messages").and_then(|v| v.as_array()) {
-            let guard = cache.write().await;
-            for msg in msgs {
-                guard.upsert_message(msg).await?;
-            }
+        let guard = cache.write().await;
+        for msg in msgs {
+            guard.upsert_domain_message(&msg).await?;
         }
     }
     Ok(())
@@ -177,59 +96,42 @@ async fn connect_and_sync_inner(
     events: &broadcast::Sender<Envelope>,
     handle: &UplinkHandle,
 ) -> Result<()> {
-    let session = Uplink::connect(config).await?;
-    info!("connected to bridge");
-    handle.attach(Arc::clone(&session.uplink)).await;
+    let bb = BlueBubbles::connect(config.clone()).await?;
+    info!("connected to BlueBubbles");
+    handle.attach(Arc::clone(&bb)).await;
     set_link_state(cache, true, false, "").await?;
-    run_session(session, config, cache, events).await
-}
 
-async fn run_session(
-    session: UplinkSession,
-    config: &SyncConfig,
-    cache: &Arc<RwLock<MessageCache>>,
-    events: &broadcast::Sender<Envelope>,
-) -> Result<()> {
-    let UplinkSession {
-        uplink,
-        events: mut bridge_events,
-        mut pump,
-    } = session;
-
-    match prefetch_cache(&uplink, config, cache).await {
-        Ok(()) => set_link_state(cache, true, true, "").await?,
+    match prefetch_cache(&bb, config, cache).await {
+        Ok(()) => {
+            set_link_state(cache, true, true, "").await?;
+            cache
+                .write()
+                .await
+                .set_meta("contacts", "granted")
+                .await?;
+        }
         Err(e) => {
             warn!("prefetch failed, staying connected: {e}");
             set_link_state(cache, true, false, &link_error_code(&e)).await?;
         }
     }
 
-    let mut contacts = ContactsLatch::default();
-    let mut generation = GenerationLatch::default();
+    let mut sub = Arc::clone(&bb).subscribe();
     let mut retry = tokio::time::interval(std::time::Duration::from_secs(30));
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
-            result = &mut pump => {
+            result = &mut sub.pump => {
                 return match result {
                     Ok(Ok(())) => Ok(()),
                     Ok(Err(e)) => Err(e),
                     Err(e) => Err(e.into()),
                 };
             }
-            evt = bridge_events.recv() => {
-                let Some(evt) = evt else { break };
-                apply_bridge_event(
-                    evt,
-                    &uplink,
-                    config,
-                    cache,
-                    events,
-                    &mut contacts,
-                    &mut generation,
-                )
-                .await?;
+            msg = sub.events.recv() => {
+                let Some(msg) = msg else { break };
+                apply_live(msg, &bb, config, cache, events).await?;
             }
             _ = retry.tick() => {
                 let ready = cache
@@ -239,7 +141,7 @@ async fn run_session(
                     .await?
                     .is_some_and(|v| v == "true");
                 if !ready {
-                    match prefetch_cache(&uplink, config, cache).await {
+                    match prefetch_cache(&bb, config, cache).await {
                         Ok(()) => set_link_state(cache, true, true, "").await?,
                         Err(e) => {
                             warn!("prefetch retry failed: {e}");
@@ -269,24 +171,19 @@ fn sync_message_event(applied: Applied) -> Envelope {
 }
 
 async fn reload_chats(
-    uplink: &Uplink,
+    bb: &BlueBubbles,
     config: &SyncConfig,
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
     reason: &str,
 ) -> Result<()> {
-    let result = uplink
-        .call("chats.list", json!({"limit": config.prefetch_chats}))
-        .await?;
-    let list = result
-        .get("chats")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let chats = bb.query_chats(config.prefetch_chats).await?;
+    let mut list = Vec::new();
     {
         let guard = cache.write().await;
-        for chat in &list {
-            guard.upsert_chat(chat).await?;
+        for chat in chats {
+            let id = guard.upsert_domain_chat(&chat).await?;
+            list.push(chat.to_cache_json(id));
         }
     }
     let _ = events.send(Envelope::Event {
@@ -296,87 +193,23 @@ async fn reload_chats(
     Ok(())
 }
 
-async fn apply_bridge_event(
-    evt: BridgeEvent,
-    uplink: &Uplink,
+async fn apply_live(
+    msg: Message,
+    bb: &BlueBubbles,
     config: &SyncConfig,
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
-    contacts: &mut ContactsLatch,
-    generation: &mut GenerationLatch,
 ) -> Result<()> {
-    match evt {
-        BridgeEvent::Message(payload) => {
-            let applied = {
-                let guard = cache.write().await;
-                guard.apply_live_message(&payload).await?
-            };
-            let unknown = matches!(applied.chat, ChatRow::Unknown { .. });
-            let _ = events.send(sync_message_event(applied));
-            if unknown {
-                if let Err(e) = reload_chats(uplink, config, cache, events, "unknown_chat").await {
-                    warn!("reload chats after unknown chat: {e}");
-                }
-            }
-        }
-        BridgeEvent::Contacts(state) => {
-            persist_contacts(cache, state).await?;
-            if let Err(e) = publish_sync_link(cache, events).await {
-                warn!("publish sync.link after contacts: {e}");
-            }
-            if contacts.take_rising_grant(state) {
-                if let Err(e) =
-                    reload_chats(uplink, config, cache, events, "contacts_granted").await
-                {
-                    warn!("reload chats after contacts grant: {e}");
-                }
-            }
-        }
-        BridgeEvent::DbGeneration { generation: gen } => {
-            if generation.changed(&gen) {
-                match prefetch_cache(uplink, config, cache).await {
-                    Ok(()) => {
-                        set_link_state(cache, true, true, "").await?;
-                        if let Err(e) =
-                            reload_chats(uplink, config, cache, events, "db_generation_changed")
-                                .await
-                        {
-                            warn!("reload chats after db generation: {e}");
-                        }
-                    }
-                    Err(e) => {
-                        warn!("prefetch after db generation failed: {e}");
-                        set_link_state(cache, true, false, &link_error_code(&e)).await?;
-                    }
-                }
-            }
-        }
-        BridgeEvent::Unknown { topic } => {
-            debug!(topic, "ignored bridge topic");
+    let applied = {
+        let guard = cache.write().await;
+        guard.apply_domain_message(&msg).await?
+    };
+    let unknown = matches!(applied.chat, ChatRow::Unknown { .. });
+    let _ = events.send(sync_message_event(applied));
+    if unknown {
+        if let Err(e) = reload_chats(bb, config, cache, events, "unknown_chat").await {
+            warn!("reload chats after unknown chat: {e}");
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn contacts_latch_only_fires_on_unavailable_to_granted() {
-        let mut latch = ContactsLatch::default();
-        assert!(!latch.take_rising_grant(ContactsState::Granted));
-        assert!(!latch.take_rising_grant(ContactsState::Unavailable));
-        assert!(latch.take_rising_grant(ContactsState::Granted));
-        assert!(!latch.take_rising_grant(ContactsState::Granted));
-    }
-
-    #[test]
-    fn generation_latch_ignores_connect_greeting() {
-        let mut latch = GenerationLatch::default();
-        assert!(!latch.changed("abc"));
-        assert!(!latch.changed("abc"));
-        assert!(latch.changed("def"));
-        assert!(!latch.changed("def"));
-    }
 }

@@ -59,6 +59,10 @@ impl MessageCache {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS identities (
+                guid TEXT PRIMARY KEY,
+                id INTEGER NOT NULL UNIQUE
+            );
             CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages(chat_id, created_at);
             "#,
         )
@@ -66,7 +70,97 @@ impl MessageCache {
         .await?;
         let cache = Self { pool };
         cache.repair_message_projections().await?;
+        cache.rebuild_identities().await?;
         Ok(cache)
+    }
+
+    async fn rebuild_identities(&self) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO identities (guid, id)
+            SELECT guid, id FROM chats WHERE guid IS NOT NULL AND guid != ''
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO identities (guid, id)
+            SELECT guid, id FROM messages WHERE guid IS NOT NULL AND guid != ''
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn id_for_guid(&self, guid: &str) -> Result<i64> {
+        if let Some(row) = sqlx::query("SELECT id FROM identities WHERE guid = ?")
+            .bind(guid)
+            .fetch_optional(&self.pool)
+            .await?
+        {
+            return Ok(row.get("id"));
+        }
+        let mut id = crate::domain::stable_id(guid);
+        loop {
+            let ins = sqlx::query("INSERT OR IGNORE INTO identities (guid, id) VALUES (?, ?)")
+                .bind(guid)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            if ins.rows_affected() == 1 {
+                return Ok(id);
+            }
+            if let Some(row) = sqlx::query("SELECT id FROM identities WHERE guid = ?")
+                .bind(guid)
+                .fetch_optional(&self.pool)
+                .await?
+            {
+                return Ok(row.get("id"));
+            }
+            let max: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM identities")
+                .fetch_one(&self.pool)
+                .await?;
+            id = max.saturating_add(1).max(1);
+        }
+    }
+
+    pub async fn guid_for_chat_id(&self, id: i64) -> Result<Option<String>> {
+        if let Some(row) = sqlx::query("SELECT guid FROM chats WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+        {
+            let g: Option<String> = row.get("guid");
+            if let Some(g) = g.filter(|s| !s.is_empty()) {
+                return Ok(Some(g));
+            }
+        }
+        let row = sqlx::query("SELECT guid FROM identities WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get("guid")))
+    }
+
+    pub async fn upsert_domain_chat(&self, chat: &crate::domain::Chat) -> Result<i64> {
+        let id = self.id_for_guid(chat.guid.as_str()).await?;
+        self.upsert_chat(&chat.to_cache_json(id)).await?;
+        Ok(id)
+    }
+
+    pub async fn upsert_domain_message(&self, msg: &crate::domain::Message) -> Result<i64> {
+        let chat_id = self.id_for_guid(msg.chat.as_str()).await?;
+        let id = self.id_for_guid(msg.guid.as_str()).await?;
+        self.upsert_message(&msg.to_cache_json(id, chat_id)).await?;
+        Ok(id)
+    }
+
+    pub async fn apply_domain_message(&self, msg: &crate::domain::Message) -> Result<Applied> {
+        let chat_id = self.id_for_guid(msg.chat.as_str()).await?;
+        let id = self.id_for_guid(msg.guid.as_str()).await?;
+        self.apply_live_message(&msg.to_cache_json(id, chat_id)).await
     }
 
     async fn repair_message_projections(&self) -> Result<()> {
@@ -114,6 +208,13 @@ impl MessageCache {
         .bind(&raw)
         .execute(&self.pool)
         .await?;
+        if let Some(guid) = chat["guid"].as_str().filter(|s| !s.is_empty()) {
+            let _ = sqlx::query("INSERT OR IGNORE INTO identities (guid, id) VALUES (?, ?)")
+                .bind(guid)
+                .bind(id)
+                .execute(&self.pool)
+                .await;
+        }
         Ok(())
     }
 
@@ -604,5 +705,21 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["chat_id"], 2);
         assert_eq!(messages[0]["is_from_me"], true);
+    }
+
+    #[tokio::test]
+    async fn id_for_guid_is_stable_and_invertible() {
+        let dir = tempdir().unwrap();
+        let cache = MessageCache::open(&dir.path().join("cache.db"))
+            .await
+            .unwrap();
+        let a = cache.id_for_guid("iMessage;-;+1555").await.unwrap();
+        let b = cache.id_for_guid("iMessage;-;+1555").await.unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, 0);
+        assert_eq!(
+            cache.guid_for_chat_id(a).await.unwrap().as_deref(),
+            Some("iMessage;-;+1555")
+        );
     }
 }
