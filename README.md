@@ -2,6 +2,11 @@
 
 iMessage on Omarchy, over Tailscale.
 
+This is the monorepo: Mac bridge, Linux sync, and the Omarchy bar plugin.
+Edit `plugin/` here. `PanicIsReal/omarchy-imessage` is a published copy of
+that folder so `omarchy plugin add` can clone a tree with `manifest.json` at
+the git root.
+
 ## Set up
 
 `imsg setup` is the product. Download a release, then run that.
@@ -30,6 +35,19 @@ Each release has two downloads.
 
 - `imsg-macos-aarch64.tar.gz` has `imsg`, `imsg-tui`, and **Imsg Setup.app**.
 - `imsg-linux-x86_64.tar.gz` has `imsg` for Omarchy.
+
+## Repo
+
+| Path | What |
+|------|------|
+| `bridge/` | Mac daemon |
+| `sync/` | Linux daemon |
+| `plugin/` | Omarchy QML plugin (source of truth) |
+| `cli/` | `imsg` binary |
+| `setup/` | Pairing wizard |
+
+Agents: see [AGENTS.md](AGENTS.md). After changing `plugin/`, run
+`./scripts/publish-plugin.sh` (CI does this on `main`).
 
 ## Notes
 

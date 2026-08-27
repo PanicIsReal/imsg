@@ -1,0 +1,31 @@
+name: publish-plugin
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - plugin/**
+      - scripts/publish-plugin.sh
+      - scripts/validate-plugin.sh
+      - .github/workflows/publish-plugin.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.repository == 'PanicIsReal/imsg' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish plugin/
+        env:
+          PLUGIN_SYNC_SSH_KEY: ${{ secrets.PLUGIN_SYNC_SSH_KEY }}
+        run: |
+          if [ -z "${PLUGIN_SYNC_SSH_KEY:-}" ]; then
+            echo "PLUGIN_SYNC_SSH_KEY is not set; skip satellite publish" >&2
+            exit 0
+          fi
+          ./scripts/publish-plugin.sh

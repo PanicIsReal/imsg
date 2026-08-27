@@ -4,6 +4,8 @@ iMessage inbox and composer for the Omarchy bar.
 
 This plugin talks only to a local `imsg-sync` daemon on a Unix socket. It never opens a network connection to a Mac.
 
+Edit the plugin in the [imsg monorepo](https://github.com/PanicIsReal/imsg) `plugin/` directory. This GitHub repo is a published copy of that folder: `omarchy plugin add` requires `manifest.json` at the clone root, so it cannot point at the monorepo.
+
 ## Prerequisites
 
 The Mac must have Homebrew `imsg` before the bridge can read Messages.
