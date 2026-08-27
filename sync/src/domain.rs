@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -106,6 +106,21 @@ impl Chat {
         })
     }
 
+    pub fn apply_contacts(&mut self, book: &ContactBook) {
+        for handle in &mut self.participants {
+            if handle.name.is_none() {
+                if let Some(name) = book.lookup(&handle.address) {
+                    handle.name = Some(name.to_string());
+                }
+            }
+        }
+        if self.display_name.is_none() {
+            if let Some(name) = book.lookup(&self.identifier) {
+                self.display_name = Some(name.to_string());
+            }
+        }
+    }
+
     pub fn to_cache_json(&self, id: i64) -> Value {
         let name = self
             .display_name
@@ -118,7 +133,7 @@ impl Chat {
             .map(|h| h.address.clone())
             .collect();
         json!({
-            "id": id,
+            "id": json_id(id),
             "guid": self.guid.as_str(),
             "name": name,
             "contact_name": name,
@@ -179,8 +194,8 @@ impl Message {
 
     pub fn to_cache_json(&self, id: i64, chat_id: i64) -> Value {
         json!({
-            "id": id,
-            "chat_id": chat_id,
+            "id": json_id(id),
+            "chat_id": json_id(chat_id),
             "guid": self.guid.as_str(),
             "text": self.text,
             "created_at": self.created_at,
@@ -272,12 +287,118 @@ fn parse_handle(value: Option<&Value>) -> Option<Handle> {
     Some(Handle {
         address,
         service: v["service"].as_str().map(str::to_string),
-        name: v["uncanonicalizedId"]
+        name: v["displayName"]
             .as_str()
             .or(v["name"].as_str())
-            .map(str::to_string)
-            .filter(|s| !s.is_empty()),
+            .or(v["uncanonicalizedId"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     })
+}
+
+pub fn json_id(id: i64) -> String {
+    id.to_string()
+}
+
+pub fn parse_json_id(value: &Value) -> Result<i64> {
+    if let Some(n) = value.as_i64() {
+        return Ok(n);
+    }
+    if let Some(n) = value.as_u64() {
+        return Ok(i64::try_from(n).unwrap_or(0));
+    }
+    if let Some(s) = value.as_str() {
+        return s.parse().context("id");
+    }
+    anyhow::bail!("id required")
+}
+
+pub fn stringify_row_ids(mut value: Value) -> Value {
+    if let Some(obj) = value.as_object_mut() {
+        for key in ["id", "chat_id"] {
+            if let Some(val) = obj.get(key) {
+                if let Ok(n) = parse_json_id(val) {
+                    obj.insert(key.to_string(), Value::String(json_id(n)));
+                }
+            }
+        }
+    }
+    value
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ContactBook {
+    names: std::collections::HashMap<String, String>,
+}
+
+impl ContactBook {
+    pub fn from_bb(value: &Value) -> Self {
+        let mut book = Self::default();
+        let Some(arr) = value.as_array() else {
+            return book;
+        };
+        for contact in arr {
+            let name = contact_display_name(contact);
+            if name.is_empty() {
+                continue;
+            }
+            let phones = contact["phoneNumbers"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let emails = contact["emails"].as_array().cloned().unwrap_or_default();
+            for entry in phones.into_iter().chain(emails) {
+                let addr = entry
+                    .get("address")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| entry.as_str());
+                let Some(addr) = addr else { continue };
+                for key in address_keys(addr) {
+                    book.names.entry(key).or_insert_with(|| name.clone());
+                }
+            }
+        }
+        book
+    }
+
+    pub fn lookup(&self, address: &str) -> Option<&str> {
+        address_keys(address)
+            .into_iter()
+            .find_map(|k| self.names.get(&k).map(String::as_str))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+}
+
+fn contact_display_name(contact: &Value) -> String {
+    contact["displayName"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let first = contact["firstName"].as_str().unwrap_or("").trim();
+            let last = contact["lastName"].as_str().unwrap_or("").trim();
+            format!("{first} {last}").trim().to_string()
+        })
+}
+
+fn address_keys(raw: &str) -> Vec<String> {
+    let raw = raw.trim();
+    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+    let mut keys = vec![raw.to_lowercase(), digits.clone()];
+    if digits.len() == 11 && digits.starts_with('1') {
+        keys.push(digits[1..].to_string());
+        keys.push(format!("+{digits}"));
+        keys.push(format!("+{}", &digits[1..]));
+    } else if digits.len() == 10 {
+        keys.push(format!("1{digits}"));
+        keys.push(format!("+1{digits}"));
+    }
+    keys
 }
 
 #[cfg(test)]
@@ -303,6 +424,41 @@ mod tests {
     }
 
     #[test]
+    fn hashed_ids_serialize_as_strings() {
+        let raw = json!({
+            "guid": "iMessage;-;+15551234567",
+            "chatIdentifier": "+15551234567",
+            "participants": [{"address": "+15551234567"}]
+        });
+        let chat = Chat::from_bb(&raw).unwrap();
+        let doc = chat.to_cache_json(8_188_273_931_022_499_394);
+        assert!(doc["id"].is_string());
+        assert_eq!(doc["id"], "8188273931022499394");
+        assert_eq!(parse_json_id(&doc["id"]).unwrap(), 8_188_273_931_022_499_394);
+    }
+
+    #[test]
+    fn contact_book_matches_plus_one_and_bare_digits() {
+        let book = ContactBook::from_bb(&json!([{
+            "displayName": "Pat Limp",
+            "firstName": "Pat",
+            "lastName": "Limp",
+            "phoneNumbers": [{"address": "14035420270"}],
+            "emails": []
+        }]));
+        assert_eq!(book.lookup("+14035420270"), Some("Pat Limp"));
+        assert_eq!(book.lookup("4035420270"), Some("Pat Limp"));
+        let mut chat = Chat::from_bb(&json!({
+            "guid": "iMessage;-;+14035420270",
+            "chatIdentifier": "+14035420270",
+            "participants": [{"address": "+14035420270", "service": "iMessage"}]
+        }))
+        .unwrap();
+        chat.apply_contacts(&book);
+        assert_eq!(chat.to_cache_json(1)["contact_name"], "Pat Limp");
+    }
+
+    #[test]
     fn from_bb_chat_dm() {
         let raw = json!({
             "guid": "iMessage;-;+15551234567",
@@ -317,7 +473,7 @@ mod tests {
         assert_eq!(chat.identifier, "+15551234567");
         assert_eq!(chat.unread_count, 2);
         let doc = chat.to_cache_json(42);
-        assert_eq!(doc["id"], 42);
+        assert_eq!(doc["id"], "42");
         assert_eq!(doc["contact_name"], "Ada");
         assert!(doc.get("chatIdentifier").is_none());
         assert!(doc.get("dateCreated").is_none());
@@ -337,7 +493,8 @@ mod tests {
         let msg = Message::from_bb(&raw, None).unwrap();
         assert_eq!(msg.chat.as_str(), "iMessage;-;+15551234567");
         let doc = msg.to_cache_json(9, 42);
-        assert_eq!(doc["chat_id"], 42);
+        assert_eq!(doc["chat_id"], "42");
+        assert_eq!(doc["id"], "9");
         assert_eq!(doc["sender"], "+15551234567");
         assert_eq!(doc["sender_name"], "Ada");
         assert_eq!(doc["is_from_me"], false);

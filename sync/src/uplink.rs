@@ -1,5 +1,5 @@
 use crate::bb::{BbError, BlueBubbles};
-use crate::domain::{ChatGuid, Message};
+use crate::domain::{ChatGuid, ContactBook, Message};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -13,6 +13,11 @@ impl UplinkHandle {
     pub async fn send_text(&self, guid: &ChatGuid, text: &str) -> Result<Message, UplinkError> {
         let bb = self.0.read().await.clone().ok_or(UplinkError::LinkDown)?;
         bb.send_text(guid, text).await
+    }
+
+    pub async fn contact_book(&self) -> Result<ContactBook, UplinkError> {
+        let bb = self.0.read().await.clone().ok_or(UplinkError::LinkDown)?;
+        bb.query_contacts().await
     }
 
     pub async fn attach(&self, bb: Arc<BlueBubbles>) {

@@ -48,10 +48,10 @@ function applyMessage(state, payload) {
     patch.unreadCount = totalUnread(patch.chats)
   }
   var msg = payload.message
-  if (msg && state.openChatId && Number(msg.chat_id) === Number(state.openChatId)) {
+  if (msg && state.openChatId && String(msg.chat_id) === String(state.openChatId)) {
     patch.messages = appendMessage(state.messages || [], msg)
   }
-  if (payload.is_new && msg && msg.is_from_me !== true && Number(msg.chat_id) !== Number(state.openChatId)) {
+  if (payload.is_new && msg && msg.is_from_me !== true && String(msg.chat_id) !== String(state.openChatId)) {
     patch.notify = {
       sender: msg.sender_name || msg.sender || "iMessage",
       preview: msg.text || "",

@@ -123,7 +123,27 @@ async fn prefetch_cache(
     creds: &Credentials,
     cache: &Arc<RwLock<MessageCache>>,
 ) -> Result<()> {
-    let chats = bb.query_chats(creds.public.prefetch_chats).await?;
+    let mut chats = bb.query_chats(creds.public.prefetch_chats).await?;
+    match bb.query_contacts().await {
+        Ok(book) if !book.is_empty() => {
+            for chat in &mut chats {
+                chat.apply_contacts(&book);
+            }
+            cache
+                .write()
+                .await
+                .set_meta("contacts", "granted")
+                .await?;
+        }
+        Ok(_) => {
+            cache
+                .write()
+                .await
+                .set_meta("contacts", "unavailable")
+                .await?;
+        }
+        Err(e) => warn!("contacts fetch failed: {e}"),
+    }
     for chat in chats {
         let guard = cache.write().await;
         guard.upsert_domain_chat(&chat).await?;
@@ -161,11 +181,6 @@ async fn connect_and_sync_inner(
     match prefetch_cache(&bb, creds, cache).await {
         Ok(()) => {
             set_link_state(cache, true, true, "").await?;
-            cache
-                .write()
-                .await
-                .set_meta("contacts", "granted")
-                .await?;
             emit_sync_link(events, cache, &link.view().await).await;
         }
         Err(e) => {

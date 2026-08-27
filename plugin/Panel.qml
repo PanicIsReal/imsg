@@ -15,7 +15,7 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
   property var imsg: null
-  property int selectedChatId: 0
+  property var selectedChatId: ""
   property string draftText: ""
   property int phraseIndex: 0
   property bool settingsOpen: false
@@ -30,9 +30,9 @@ Panel {
   readonly property color normalFill: Style.normalFillFor(fg, Color.accent)
 
   readonly property string currentTitle: {
-    if (!imsg || !imsg.chats || selectedChatId <= 0) return ""
+    if (!imsg || !imsg.chats || !Models.hasId(selectedChatId)) return ""
     for (var i = 0; i < imsg.chats.length; i++) {
-      if (imsg.chats[i].id === selectedChatId) return Models.chatTitle(imsg.chats[i])
+      if (Models.sameId(imsg.chats[i].id, selectedChatId)) return Models.chatTitle(imsg.chats[i])
     }
     return ""
   }
@@ -76,7 +76,7 @@ Panel {
   }
 
   function maybeSelectFirst() {
-    if (selectedChatId > 0 || !imsg || !imsg.chats || imsg.chats.length === 0) return
+    if (Models.hasId(selectedChatId) || !imsg || !imsg.chats || imsg.chats.length === 0) return
     openChat(imsg.chats[0].id)
   }
 
@@ -85,13 +85,13 @@ Panel {
     if (imsg) {
       imsg.refreshChats()
       imsg.refreshStatus()
-      if (selectedChatId > 0) openChat(selectedChatId)
+      if (Models.hasId(selectedChatId)) openChat(selectedChatId)
       else maybeSelectFirst()
     }
   }
 
   function close() {
-    if (imsg) imsg.openChatId = 0
+    if (imsg) imsg.openChatId = ""
     root.controller.hide()
   }
 
@@ -107,16 +107,16 @@ Panel {
   }
 
   function openChat(chatId) {
-    selectedChatId = chatId
+    selectedChatId = String(chatId || "")
     draftText = ""
     if (imsg) {
-      imsg.openChatId = chatId
-      imsg.loadMessages(chatId, null)
+      imsg.openChatId = selectedChatId
+      imsg.loadMessages(selectedChatId, null)
     }
   }
 
   function sendDraft() {
-    if (!imsg || selectedChatId <= 0 || draftText.trim().length === 0) return
+    if (!imsg || !Models.hasId(selectedChatId) || draftText.trim().length === 0) return
     imsg.sendMessage(selectedChatId, draftText)
     draftText = ""
   }
@@ -125,7 +125,7 @@ Panel {
     if (!imsg || !imsg.chats || imsg.chats.length === 0 || delta === 0) return
     var i = 0
     for (; i < imsg.chats.length; i++) {
-      if (imsg.chats[i].id === selectedChatId) break
+      if (Models.sameId(imsg.chats[i].id, selectedChatId)) break
     }
     if (i >= imsg.chats.length) i = 0
     var n = Math.max(0, Math.min(imsg.chats.length - 1, i + delta))
@@ -328,7 +328,7 @@ Panel {
                 width: chatList.width
                 implicitHeight: chatInfo.implicitHeight + Style.spacing.rowPaddingX
                 hasCursor: false
-                current: root.selectedChatId === modelData.id
+                current: Models.sameId(root.selectedChatId, modelData.id)
                 foreground: root.fg
                 fill: root.hoverFill
                 currentFill: root.selectedFill
@@ -477,7 +477,7 @@ Panel {
 
               header: Item {
                 width: threadView.width
-                height: selectedChatId > 0 && imsg && imsg.messages && imsg.messages.length > 0 ? Style.space(36) : 0
+                height: Models.hasId(selectedChatId) && imsg && imsg.messages && imsg.messages.length > 0 ? Style.space(36) : 0
                 Button {
                   anchors.horizontalCenter: parent.horizontalCenter
                   visible: parent.height > 0
@@ -537,7 +537,7 @@ Panel {
               color: root.dim
               font.family: root.family
               font.pixelSize: Style.font.body
-              text: selectedChatId > 0 ? "No messages in this chat yet." : "Select a conversation."
+              text: Models.hasId(selectedChatId) ? "No messages in this chat yet." : "Select a conversation."
             }
 
             Row {
@@ -551,8 +551,8 @@ Panel {
                 id: draftField
                 width: parent.width - sendBtn.width - parent.spacing
                 foreground: root.fg
-                placeholderText: selectedChatId > 0 ? "Message" : "Select a conversation"
-                enabled: selectedChatId > 0 && imsg && !imsg.sending
+                placeholderText: Models.hasId(selectedChatId) ? "Message" : "Select a conversation"
+                enabled: Models.hasId(selectedChatId) && imsg && !imsg.sending
                 text: root.draftText
                 onTextChanged: root.draftText = text
                 onAccepted: root.sendDraft()
@@ -563,7 +563,7 @@ Panel {
                 text: imsg && imsg.sending ? "…" : "Send"
                 foreground: root.fg
                 fontFamily: root.family
-                enabled: selectedChatId > 0 && imsg && !imsg.sending && root.draftText.trim().length > 0
+                enabled: Models.hasId(selectedChatId) && imsg && !imsg.sending && root.draftText.trim().length > 0
                 onClicked: root.sendDraft()
               }
             }

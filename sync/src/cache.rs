@@ -188,7 +188,7 @@ impl MessageCache {
     }
 
     pub async fn upsert_chat(&self, chat: &Value) -> Result<()> {
-        let id = chat["id"].as_i64().unwrap_or(0);
+        let id = crate::domain::parse_json_id(&chat["id"]).unwrap_or(0);
         let raw = serde_json::to_string(chat)?;
         sqlx::query(
             r#"INSERT INTO chats (id, guid, name, identifier, service, last_message_at, unread_count, participants_json, raw_json)
@@ -219,13 +219,13 @@ impl MessageCache {
     }
 
     pub async fn upsert_message(&self, msg: &Value) -> Result<()> {
-        let id = msg["id"].as_i64().unwrap_or(0);
+        let id = crate::domain::parse_json_id(&msg["id"]).unwrap_or(0);
         let existing = load_raw_json(&self.pool, id).await?;
         persist_message(&self.pool, &merge_message(existing, msg)).await
     }
 
     pub async fn apply_live_message(&self, msg: &Value) -> Result<Applied> {
-        let id = msg["id"].as_i64().unwrap_or(0);
+        let id = crate::domain::parse_json_id(&msg["id"]).unwrap_or(0);
         let mut tx = self.pool.begin().await?;
 
         let existing = load_raw_json(&mut *tx, id).await?;
@@ -233,7 +233,7 @@ impl MessageCache {
         let merged = merge_message(existing, msg);
         persist_message(&mut *tx, &merged).await?;
 
-        let chat_id = merged["chat_id"].as_i64().unwrap_or(0);
+        let chat_id = crate::domain::parse_json_id(&merged["chat_id"]).unwrap_or(0);
         let created_at = merged["created_at"].as_str();
         let is_from_me = merged["is_from_me"].as_bool().unwrap_or(false);
 
@@ -274,8 +274,11 @@ impl MessageCache {
 
         tx.commit().await?;
         Ok(Applied {
-            message: merged,
-            chat,
+            message: crate::domain::stringify_row_ids(merged),
+            chat: match chat {
+                ChatRow::Updated(v) => ChatRow::Updated(crate::domain::stringify_row_ids(v)),
+                other => other,
+            },
             is_new,
         })
     }
@@ -288,7 +291,8 @@ impl MessageCache {
         rows.iter()
             .map(|r| {
                 let s: String = r.get("raw_json");
-                Ok(serde_json::from_str(&s)?)
+                let v: Value = serde_json::from_str(&s)?;
+                Ok(crate::domain::stringify_row_ids(v))
             })
             .collect()
     }
@@ -321,11 +325,34 @@ impl MessageCache {
             .iter()
             .map(|r| {
                 let s: String = r.get("raw_json");
-                serde_json::from_str(&s)
+                serde_json::from_str(&s).map(crate::domain::stringify_row_ids)
             })
             .collect::<Result<_, _>>()?;
         out.reverse();
         Ok(out)
+    }
+
+    pub async fn apply_contact_book(&self, book: &crate::domain::ContactBook) -> Result<u32> {
+        let chats = self.list_chats(500).await?;
+        let mut n = 0u32;
+        for mut chat in chats {
+            let ident = chat["identifier"].as_str().unwrap_or("").to_string();
+            let Some(name) = book.lookup(&ident) else {
+                continue;
+            };
+            let current = chat["contact_name"]
+                .as_str()
+                .or(chat["name"].as_str())
+                .unwrap_or("");
+            if current == name {
+                continue;
+            }
+            chat["name"] = Value::String(name.to_string());
+            chat["contact_name"] = Value::String(name.to_string());
+            self.upsert_chat(&chat).await?;
+            n += 1;
+        }
+        Ok(n)
     }
 
     pub async fn set_meta(&self, key: &str, value: &str) -> Result<()> {
@@ -421,8 +448,8 @@ where
              is_from_me=excluded.is_from_me,
              raw_json=excluded.raw_json"#,
     )
-    .bind(msg["id"].as_i64().unwrap_or(0))
-    .bind(msg["chat_id"].as_i64().unwrap_or(0))
+    .bind(crate::domain::parse_json_id(&msg["id"]).unwrap_or(0))
+    .bind(crate::domain::parse_json_id(&msg["chat_id"]).unwrap_or(0))
     .bind(msg["guid"].as_str())
     .bind(msg["sender"].as_str())
     .bind(msg["sender_name"].as_str())
@@ -582,7 +609,7 @@ mod tests {
         assert_eq!(applied.chat, ChatRow::Unknown { chat_id: 99 });
         let messages = cache.list_messages(99, 10, None).await.unwrap();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["id"], 10);
+        assert_eq!(messages[0]["id"], "10");
         assert_eq!(messages[0]["text"], "orphan");
     }
 
@@ -633,7 +660,7 @@ mod tests {
         let messages = cache.list_messages(2, 10, None).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["text"], "Testing");
-        assert_eq!(messages[0]["chat_id"], 2);
+        assert_eq!(messages[0]["chat_id"], "2");
         assert_eq!(messages[0]["is_from_me"], true);
         assert_eq!(messages[0]["created_at"], "2026-08-26T04:57:12.799Z");
     }
@@ -703,7 +730,7 @@ mod tests {
             .unwrap();
         let messages = cache.list_messages(2, 10, None).await.unwrap();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["chat_id"], 2);
+        assert_eq!(messages[0]["chat_id"], "2");
         assert_eq!(messages[0]["is_from_me"], true);
     }
 

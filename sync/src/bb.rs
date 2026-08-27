@@ -1,4 +1,4 @@
-use crate::domain::{Chat, ChatGuid, Message, MessageGuid};
+use crate::domain::{Chat, ChatGuid, ContactBook, Message, MessageGuid};
 use crate::link::Credentials;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -83,6 +83,12 @@ impl BlueBubbles {
             .map(Chat::from_bb)
             .collect::<Result<Vec<_>>>()
             .map_err(|e| BbError::Upstream(e.to_string()))
+    }
+
+    pub async fn query_contacts(&self) -> Result<ContactBook, BbError> {
+        let body = self.get("api/v1/contact").await?;
+        let data = envelope_data(&body)?;
+        Ok(ContactBook::from_bb(&data))
     }
 
     pub async fn chat_messages(&self, chat: &ChatGuid, limit: u32) -> Result<Vec<Message>, BbError> {

@@ -8,7 +8,7 @@ Item {
   id: root
   property int unreadCount: 0
   property var chats: []
-  property int openChatId: 0
+  property var openChatId: ""
   property var messages: []
   property bool syncing: true
   property bool connected: false
@@ -67,7 +67,7 @@ Item {
       applyPatch(Store.applySnapshot(frame.result))
       root.connected = true
       root.syncing = false
-      if (root.openChatId > 0) root.loadMessages(root.openChatId, null)
+      if (root.openChatId) root.loadMessages(root.openChatId, null)
       return
     }
     if (frame.type === "event") {
@@ -310,7 +310,7 @@ Item {
     running: false
     command: []
     property string payload: ""
-    property int chatId: 0
+    property var chatId: ""
     property string stderrText: ""
     stdinEnabled: true
     onStarted: {

@@ -28,8 +28,8 @@ BarWidget {
   }
 
   function openChat(chatId) {
-    var id = Number(chatId)
-    if (!panelLoader.item || !(id > 0)) {
+    var id = String(chatId || "")
+    if (!panelLoader.item || id.length === 0 || id === "0") {
       root.open()
       return
     }

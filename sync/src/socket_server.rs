@@ -233,13 +233,26 @@ async fn dispatch(
             Ok(view.to_status_fields())
         }
         "contacts.authorize" => {
-            if !link.uplink().is_up().await {
-                return Err(UplinkError::LinkDown.into());
-            }
-            Ok(json!({"outcome": "granted", "names_visible": true}))
+            let book = link.uplink().contact_book().await?;
+            let n = cache.write().await.apply_contact_book(&book).await?;
+            let chats = cache.read().await.list_chats(50).await?;
+            let _ = events.send(Envelope::Event {
+                topic: "sync.chats".into(),
+                payload: json!({"reason": "contacts", "chats": chats}),
+            });
+            let names_visible = n > 0
+                || chats.iter().any(|c| {
+                    c["contact_name"]
+                        .as_str()
+                        .is_some_and(|s| s.chars().any(|ch| ch.is_alphabetic()))
+                });
+            Ok(json!({
+                "outcome": if names_visible { "granted" } else { "unavailable" },
+                "names_visible": names_visible
+            }))
         }
         "messages.send" => {
-            let chat_id = params["chat_id"].as_i64().context("chat_id required")?;
+            let chat_id = crate::domain::parse_json_id(&params["chat_id"]).context("chat_id required")?;
             let text = params["text"].as_str().context("text required")?;
             let guid = cache
                 .read()
@@ -262,7 +275,7 @@ async fn dispatch(
         }
         "messages.history" => {
             let guard = cache.read().await;
-            let chat_id = params["chat_id"].as_i64().context("chat_id required")?;
+            let chat_id = crate::domain::parse_json_id(&params["chat_id"]).context("chat_id required")?;
             let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
             let before = params.get("before").and_then(|v| v.as_str());
             let messages = guard.list_messages(chat_id, limit, before).await?;

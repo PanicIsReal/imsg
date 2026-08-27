@@ -1,5 +1,14 @@
 .pragma library
 
+function sameId(a, b) {
+  return String(a || "") === String(b || "")
+}
+
+function hasId(id) {
+  var s = String(id || "")
+  return s.length > 0 && s !== "0"
+}
+
 function chatTitle(chat) {
   if (!chat) return "Chat"
   if (chat.contact_name && chat.contact_name.length > 0) return chat.contact_name
