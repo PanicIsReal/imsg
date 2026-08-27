@@ -73,4 +73,14 @@ done
 link="$(find "$plugin" -name .git -prune -o -type l -print -quit 2>/dev/null || true)"
 [[ -z "$link" ]] || fail "symlinks are not allowed inside a plugin folder: $link"
 
+banned="$(grep -RInE 'Grant Full Disk|Full Disk Access|mac-locked|needs-fda|Messages is locked|Mac Messages database is locked' \
+  --include='*.qml' --include='*.js' "$plugin" || true)"
+[[ -z "$banned" ]] || fail "plugin UI must not mention Full Disk Access:
+$banned"
+
+status_test="$root/scripts/plugin-status.test.mjs"
+if [[ -f "$status_test" ]] && command -v node >/dev/null 2>&1; then
+  IMSG_PLUGIN_ROOT="$plugin" node "$status_test"
+fi
+
 echo "validate-plugin ok ($id)"
