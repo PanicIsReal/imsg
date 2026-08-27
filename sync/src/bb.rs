@@ -1,5 +1,5 @@
-use crate::config::SyncConfig;
 use crate::domain::{Chat, ChatGuid, Message, MessageGuid};
+use crate::link::Credentials;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -34,7 +34,7 @@ impl BbError {
 
 pub struct BlueBubbles {
     http: reqwest::Client,
-    config: SyncConfig,
+    creds: Credentials,
 }
 
 pub struct Subscription {
@@ -43,16 +43,16 @@ pub struct Subscription {
 }
 
 impl BlueBubbles {
-    pub fn new(config: SyncConfig) -> Result<Self> {
+    pub fn new(creds: Credentials) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
             .context("http client")?;
-        Ok(Self { http, config })
+        Ok(Self { http, creds })
     }
 
-    pub async fn connect(config: SyncConfig) -> Result<Arc<Self>> {
-        let client = Arc::new(Self::new(config)?);
+    pub async fn connect(creds: Credentials) -> Result<Arc<Self>> {
+        let client = Arc::new(Self::new(creds)?);
         client.ping().await?;
         Ok(client)
     }
@@ -60,7 +60,10 @@ impl BlueBubbles {
     pub async fn ping(&self) -> Result<(), BbError> {
         let body = self.get("api/v1/ping").await?;
         let data = envelope_data(&body)?;
-        if data.as_str() == Some("pong") || data["message"].as_str() == Some("pong") || body["status"].as_i64() == Some(200) {
+        if data.as_str() == Some("pong")
+            || data["message"].as_str() == Some("pong")
+            || body["status"].as_i64() == Some(200)
+        {
             Ok(())
         } else {
             Err(BbError::Upstream("ping failed".into()))
@@ -85,7 +88,9 @@ impl BlueBubbles {
     pub async fn chat_messages(&self, chat: &ChatGuid, limit: u32) -> Result<Vec<Message>, BbError> {
         let encoded = path_encode(chat.as_str());
         let body = self
-            .get(&format!("api/v1/chat/{encoded}/message?limit={limit}&offset=0&sort=DESC"))
+            .get(&format!(
+                "api/v1/chat/{encoded}/message?limit={limit}&offset=0&sort=DESC"
+            ))
             .await?;
         let data = envelope_data(&body)?;
         let arr = data.as_array().cloned().unwrap_or_default();
@@ -155,12 +160,13 @@ impl BlueBubbles {
 
     fn authed(&self, path: &str) -> Result<reqwest::Url, BbError> {
         let mut url = self
-            .config
+            .creds
+            .public
             .server
             .join(path)
-            .map_err(|e| BbError::Transport(e))?;
+            .map_err(BbError::Transport)?;
         url.query_pairs_mut()
-            .append_pair("password", self.config.password.as_str());
+            .append_pair("password", self.creds.password().as_str());
         Ok(url)
     }
 }
