@@ -45,9 +45,8 @@ Panel {
     cacheReady: false,
     statusKnown: false,
     bridgeConnected: false,
-    databaseReady: false,
-    lastError: "",
     contacts: "unknown",
+    namesVisible: false,
     passwordSet: false
   })
   readonly property bool settingsVisible: root.settingsOpen || root.setupGuide.phase === "needs-settings"
@@ -61,7 +60,6 @@ Panel {
   readonly property string heroMeta: {
     if (!imsg) return "Starting"
     if (imsg.linkState === "live") return livePhrases[phraseIndex % livePhrases.length]
-    if (imsg.linkState === "mac-locked") return "Messages is locked"
     if (imsg.linkState === "mac-down") return "Mac link is down"
     if (imsg.linkState === "sync-down") return "Sync is down"
     if (imsg.linkState === "checking") return "Checking the Mac"
@@ -74,7 +72,6 @@ Panel {
   readonly property string statusLine: {
     if (!imsg) return ""
     if (imsg.sendError && imsg.sendError.length > 0) return imsg.sendError
-    if (imsg.linkState === "mac-locked") return "Grant Full Disk Access to BlueBubbles on the Mac."
     if (imsg.linkState === "mac-down") return "Showing saved messages. The Mac link is down."
     return ""
   }

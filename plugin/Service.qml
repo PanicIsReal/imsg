@@ -42,23 +42,28 @@ Item {
     return extras.length === 0 ? hist : hist.concat(extras)
   }
   readonly property bool cacheReady: chats && chats.length > 0
-  readonly property string linkState: {
-    if (!connected && !cacheReady) return "waiting"
-    if (!connected) return "sync-down"
-    if (!statusKnown) return "checking"
-    if (bridgeConnected && databaseReady) return "live"
-    if (bridgeConnected) return "mac-locked"
-    return "mac-down"
+  readonly property bool namesVisible: {
+    if (!chats) return false
+    for (var i = 0; i < chats.length; i++) {
+      var n = String(chats[i].contact_name || chats[i].display_name || chats[i].name || "")
+      if (/[A-Za-z]/.test(n)) return true
+    }
+    return false
   }
+  readonly property string linkState: Store.linkState({
+    connected: root.connected,
+    cacheReady: root.cacheReady,
+    statusKnown: root.statusKnown,
+    bridgeConnected: root.bridgeConnected
+  })
   readonly property string contactsState: root.contacts || "unknown"
   readonly property var setupGuide: Store.setupGuide({
     connected: root.connected,
     cacheReady: root.cacheReady,
     statusKnown: root.statusKnown,
     bridgeConnected: root.bridgeConnected,
-    databaseReady: root.databaseReady,
-    lastError: root.lastError,
     contacts: root.contacts,
+    namesVisible: root.namesVisible,
     passwordSet: !!(root.settings && root.settings.password_set)
   })
   readonly property string requestScript: {

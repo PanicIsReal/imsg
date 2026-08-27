@@ -119,6 +119,15 @@ function totalUnread(chats) {
   return n
 }
 
+function linkState(s) {
+  s = s || {}
+  if (!s.connected && !s.cacheReady) return "waiting"
+  if (!s.connected) return "sync-down"
+  if (!s.statusKnown) return "checking"
+  if (s.bridgeConnected) return "live"
+  return "mac-down"
+}
+
 function setupGuide(s) {
   s = s || {}
   if (s.cacheReady) {
@@ -127,7 +136,7 @@ function setupGuide(s) {
       title: "",
       body: "",
       hint: "",
-      actionKind: s.contacts === "unavailable" ? "contacts" : ""
+      actionKind: (s.contacts === "unavailable" && !s.namesVisible) ? "contacts" : ""
     }
   }
   if (!s.connected) {
@@ -157,11 +166,11 @@ function setupGuide(s) {
       actionKind: ""
     }
   }
-  if (s.bridgeConnected && !s.databaseReady) {
+  if (s.bridgeConnected && !s.cacheReady) {
     return {
-      phase: "needs-fda",
-      title: "Messages is locked on your Mac",
-      body: "Grant Full Disk Access to BlueBubbles on the Mac. The list appears after that.",
+      phase: "loading",
+      title: "Loading conversations",
+      body: "The Mac link is up. Chats appear here in a moment.",
       hint: "",
       actionKind: ""
     }
@@ -169,8 +178,8 @@ function setupGuide(s) {
   return {
     phase: "needs-mac",
     title: "This machine is not linked",
-    body: "BlueBubbles is running on the Mac. Point this machine at it in Settings, or with the command below.",
-    hint: "imsg setup connect --url http://<mac-tailscale-ip>:1234 --password <password>",
+    body: "BlueBubbles is running on the Mac. Point this machine at it in Settings.",
+    hint: "",
     actionKind: "settings"
   }
 }

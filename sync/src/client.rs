@@ -82,7 +82,7 @@ async fn connect_and_sync(
 fn last_error(result: &Result<()>) -> String {
     match result {
         Ok(()) => String::new(),
-        Err(e) => link_error_code(e),
+        Err(e) => e.to_string(),
     }
 }
 
@@ -107,15 +107,6 @@ async fn set_link_state(
         .await?;
     guard.set_meta("last_error", last_error).await?;
     Ok(())
-}
-
-fn link_error_code(err: &impl ToString) -> String {
-    let s = err.to_string();
-    if s.contains("Database unavailable") || s.contains("Full Disk Access") {
-        "database_unavailable".into()
-    } else {
-        s
-    }
 }
 
 async fn prefetch_cache(
@@ -191,20 +182,16 @@ async fn connect_and_sync_inner(
     info!("connected to BlueBubbles");
     handle.attach(Arc::clone(&bb)).await;
     link.set_connecting(false);
-    set_link_state(cache, true, false, "").await?;
+    set_link_state(cache, true, true, "").await?;
     emit_sync_link(events, cache, &link.view().await).await;
 
-    match prefetch_cache(&bb, creds, cache).await {
-        Ok(()) => {
-            set_link_state(cache, true, true, "").await?;
-            emit_sync_link(events, cache, &link.view().await).await;
-        }
+    let mut prefetch_ok = match prefetch_cache(&bb, creds, cache).await {
+        Ok(()) => true,
         Err(e) => {
             warn!("prefetch failed, staying connected: {e}");
-            set_link_state(cache, true, false, &link_error_code(&e)).await?;
-            emit_sync_link(events, cache, &link.view().await).await;
+            false
         }
-    }
+    };
 
     let mut sub = Arc::clone(&bb).subscribe();
     let mut retry = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -228,23 +215,10 @@ async fn connect_and_sync_inner(
                 apply_live(msg, &bb, creds, cache, events).await?;
             }
             _ = retry.tick() => {
-                let ready = cache
-                    .read()
-                    .await
-                    .get_meta("database_ready")
-                    .await?
-                    .is_some_and(|v| v == "true");
-                if !ready {
+                if !prefetch_ok {
                     match prefetch_cache(&bb, creds, cache).await {
-                        Ok(()) => {
-                            set_link_state(cache, true, true, "").await?;
-                            emit_sync_link(events, cache, &link.view().await).await;
-                        }
-                        Err(e) => {
-                            warn!("prefetch retry failed: {e}");
-                            set_link_state(cache, true, false, &link_error_code(&e)).await?;
-                            emit_sync_link(events, cache, &link.view().await).await;
-                        }
+                        Ok(()) => prefetch_ok = true,
+                        Err(e) => warn!("prefetch retry failed: {e}"),
                     }
                 }
             }

@@ -101,7 +101,7 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    dimmed: root.linkState === "mac-down" || root.linkState === "sync-down" || root.linkState === "mac-locked"
+    dimmed: root.linkState === "mac-down" || root.linkState === "sync-down"
     text: imsg && imsg.unreadCount > 0 ? "󰍩 " + imsg.unreadCount : "󰍩"
     tooltipText: {
       var guide = imsg && imsg.setupGuide
