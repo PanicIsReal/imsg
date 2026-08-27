@@ -48,6 +48,32 @@ After editing `plugin/`, publish the installable slice:
 CI also publishes `plugin/` to `PanicIsReal/omarchy-imessage` on push to
 `main` when `PLUGIN_SYNC_SSH_KEY` is set.
 
+## CI runners
+
+All GitHub Actions jobs use self-hosted runners. None of them should use
+`ubuntu-latest` or `macos-latest`.
+
+| Jobs | `runs-on` |
+|------|-----------|
+| `plugin`, `linux`, `publish`, `publish-plugin` | `[self-hosted, linux]` |
+| `mac` (build, TUI, codesign) | `[self-hosted, macOS]` |
+
+GitHub applies those OS labels automatically when you register a runner.
+This repo currently has zero runners, so jobs will queue until both exist.
+
+Register from the machine that should run the jobs:
+
+1. Repo **Settings → Actions → Runners → New self-hosted runner**
+2. Follow the Linux x64 or macOS ARM64 instructions
+3. `./config.sh --url https://github.com/PanicIsReal/imsg --token <token>`
+4. Install as a service (`./svc.sh install && ./svc.sh start` on Linux;
+   the Mac equivalent in the GitHub script)
+
+Linux runner needs `git`, `jq`, `file`, `tar`, and network (the workflow
+installs the Rust toolchain). Mac runner needs Xcode CLT, `git`, and
+network (`setup-bun` plus rustup). Codesign uses the Mac keychain or the
+existing `DEVELOPER_ID_*` / `NOTARY_*` secrets.
+
 ## Install URLs (do not "fix" these)
 
 - Releases and this repo: `https://github.com/PanicIsReal/imsg`

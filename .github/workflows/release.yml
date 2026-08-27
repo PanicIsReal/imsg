@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
           path: dist/imsg-linux-x86_64.tar.gz*
 
   mac:
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -83,7 +83,7 @@ jobs:
 
   publish:
     needs: [linux, mac]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     timeout-minutes: 15
     steps:
       - name: Require v tag
