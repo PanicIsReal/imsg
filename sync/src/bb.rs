@@ -118,18 +118,19 @@ impl BlueBubbles {
     }
 
     pub async fn send_text(&self, chat: &ChatGuid, text: &str) -> Result<Message, BbError> {
+        let temp = format!("temp-{}", Uuid::new_v4());
         let body = self
             .post(
                 "api/v1/message/text",
                 json!({
                     "chatGuid": chat.as_str(),
-                    "tempGuid": format!("temp-{}", Uuid::new_v4()),
+                    "tempGuid": temp,
                     "message": text,
                 }),
             )
             .await?;
         let data = envelope_data(&body)?;
-        Message::from_bb(&data, Some(chat)).map_err(|e| BbError::Upstream(e.to_string()))
+        message_from_send_response(data, chat, text, &temp)
     }
 
     pub async fn recent_messages(&self, limit: u32) -> Result<Vec<Message>, BbError> {
@@ -223,6 +224,39 @@ fn path_encode(s: &str) -> String {
     out
 }
 
+fn message_from_send_response(
+    data: Value,
+    chat: &ChatGuid,
+    text: &str,
+    temp: &str,
+) -> Result<Message, BbError> {
+    let payload = if data
+        .get("guid")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+    {
+        data
+    } else if let Some(inner) = data.get("message").cloned() {
+        inner
+    } else if let Some(first) = data.as_array().and_then(|a| a.first()).cloned() {
+        first
+    } else {
+        data
+    };
+    if let Ok(msg) = Message::from_bb(&payload, Some(chat)) {
+        return Ok(msg);
+    }
+    Ok(Message {
+        guid: MessageGuid::parse(temp).map_err(|e| BbError::Upstream(e.to_string()))?,
+        chat: chat.clone(),
+        text: text.to_string(),
+        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        is_from_me: true,
+        sender: None,
+        attachments: Vec::new(),
+    })
+}
+
 fn envelope_data(body: &Value) -> Result<Value, BbError> {
     if let Some(err) = body.get("error") {
         if !err.is_null() {
@@ -270,7 +304,6 @@ async fn poll_loop(client: Arc<BlueBubbles>, tx: mpsc::Sender<Message>) -> Resul
     }
 }
 
-#[allow(dead_code)]
 pub fn dedupe_guid(seen: &mut VecDeque<MessageGuid>, guid: &MessageGuid) -> bool {
     if seen.iter().any(|g| g == guid) {
         return false;
@@ -300,5 +333,42 @@ mod tests {
         let g = MessageGuid::parse("A").unwrap();
         assert!(dedupe_guid(&mut seen, &g));
         assert!(!dedupe_guid(&mut seen, &g));
+    }
+
+    #[test]
+    fn send_response_uses_message_body_when_guid_present() {
+        let chat = ChatGuid::parse("iMessage;-;+15551212").unwrap();
+        let data = json!({
+            "guid": "MSG-1",
+            "text": "hi",
+            "isFromMe": true,
+            "dateCreated": 1_700_000_000_000i64,
+        });
+        let msg = message_from_send_response(data, &chat, "hi", "temp-x").unwrap();
+        assert_eq!(msg.guid.as_str(), "MSG-1");
+        assert_eq!(msg.text, "hi");
+        assert!(msg.is_from_me);
+        assert_eq!(msg.chat.as_str(), "iMessage;-;+15551212");
+    }
+
+    #[test]
+    fn send_response_unwraps_nested_message_and_stubs_missing_guid() {
+        let chat = ChatGuid::parse("iMessage;-;+15551212").unwrap();
+        let nested = json!({"message": {"text": "hi", "isFromMe": true}});
+        let msg = message_from_send_response(nested, &chat, "hi", "temp-nested").unwrap();
+        assert_eq!(msg.guid.as_str(), "temp-nested");
+        assert_eq!(msg.text, "hi");
+        assert!(msg.is_from_me);
+
+        let empty = json!({"status": "queued"});
+        let stub = message_from_send_response(empty, &chat, "queued", "temp-empty").unwrap();
+        assert_eq!(stub.guid.as_str(), "temp-empty");
+        assert_eq!(stub.text, "queued");
+    }
+
+    #[test]
+    fn send_envelope_error_is_not_a_successful_stub() {
+        let err = json!({"status": 400, "message": "not delivered", "error": {"error": "not delivered"}});
+        assert!(envelope_data(&err).is_err());
     }
 }
