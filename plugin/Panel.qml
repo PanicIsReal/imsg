@@ -18,6 +18,7 @@ Panel {
   property int selectedChatId: 0
   property string draftText: ""
   property int phraseIndex: 0
+  property bool settingsOpen: false
 
   readonly property var barIdentity: hostWidget || root
   readonly property color fg: bar ? bar.foreground : Color.foreground
@@ -42,8 +43,10 @@ Panel {
     bridgeConnected: false,
     databaseReady: false,
     lastError: "",
-    contacts: "unknown"
+    contacts: "unknown",
+    passwordSet: false
   })
+  readonly property bool settingsVisible: root.settingsOpen || root.setupGuide.phase === "needs-settings"
   readonly property bool setupReady: root.setupGuide.phase === "ready"
   readonly property var livePhrases: [
     "Delivering bubbles",
@@ -183,7 +186,7 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       clip: true
-      blocked: draftField.activeFocus
+      blocked: draftField.activeFocus || settingsForm.editing
       onMoveRequested: function(dx, dy) {
         if (dy !== 0) root.moveChat(dy)
       }
@@ -195,27 +198,63 @@ Panel {
         anchors.fill: parent
         spacing: Style.space(12)
 
-        PanelHero {
-          id: hero
+        Item {
+          id: header
           width: parent.width
-          title: "iMessage"
-          meta: root.heroMeta
-          detail: root.heroDetail
-          foreground: root.fg
-          fontFamily: root.family
-          iconOpacity: imsg && imsg.linkState === "live" ? 1.0 : 0.55
-          iconComponent: Component {
-            Text {
-              text: "󰍩"
-              color: root.fg
-              font.family: root.family
-              font.pixelSize: Style.font.display
+          implicitHeight: hero.implicitHeight
+          height: hero.height
+          function toggleSettings() {
+            root.settingsOpen = !root.settingsOpen
+          }
+
+          PanelHero {
+            id: hero
+            width: parent.width
+            title: "iMessage"
+            meta: root.heroMeta
+            detail: root.heroDetail
+            foreground: root.fg
+            fontFamily: root.family
+            iconOpacity: imsg && imsg.linkState === "live" ? 1.0 : 0.55
+            iconComponent: Component {
+              Text {
+                text: "󰍩"
+                color: root.fg
+                font.family: root.family
+                font.pixelSize: Style.font.display
+              }
+            }
+            trailingControl: Component {
+              Button {
+                iconText: "󰒓"
+                tooltipText: "Settings"
+                foreground: hero.foreground
+                fontFamily: hero.fontFamily
+                onClicked: header.toggleSettings()
+              }
             }
           }
         }
 
+        SettingsForm {
+          id: settingsForm
+          width: parent.width
+          visible: root.settingsVisible
+          serverUrl: imsg && imsg.settings ? imsg.settings.server_url : ""
+          passwordSet: imsg && imsg.settings ? !!imsg.settings.password_set : false
+          session: imsg && imsg.settings ? String(imsg.settings.session) : "unconfigured"
+          saving: !!(imsg && imsg.settingsSaving)
+          foreground: root.fg
+          fontFamily: root.family
+          lastError: imsg ? imsg.lastError : ""
+          onSaveRequested: function (url, password) {
+            if (imsg) imsg.saveSettings(url, password)
+          }
+          onReconnectRequested: if (imsg) imsg.reconnect()
+        }
+
         Column {
-          visible: !root.setupReady
+          visible: !root.setupReady && !root.settingsVisible
           width: parent.width
           spacing: Style.space(12)
 
@@ -255,9 +294,9 @@ Panel {
 
         Row {
           id: panes
-          visible: root.setupReady
+          visible: root.setupReady && !root.settingsOpen
           width: parent.width
-          height: parent.height - hero.height - parent.spacing
+          height: parent.height - header.height - parent.spacing
           spacing: Style.space(12)
 
           Column {

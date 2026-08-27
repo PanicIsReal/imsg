@@ -1,40 +1,89 @@
 use crate::bb::BlueBubbles;
 use crate::cache::{Applied, ChatRow, MessageCache};
-use crate::config::SyncConfig;
 use crate::domain::Message;
+use crate::link::{emit_sync_link, Credentials, Link};
 use crate::uplink::UplinkHandle;
 use anyhow::Result;
 use imsg_proto::Envelope;
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, watch, RwLock};
 use tracing::{info, warn};
 
-pub async fn bridge_loop(
-    config: SyncConfig,
+pub(crate) async fn run_generation(
+    link: Arc<Link>,
+    creds: Credentials,
     cache: Arc<RwLock<MessageCache>>,
     events: broadcast::Sender<Envelope>,
-    handle: UplinkHandle,
-) -> Result<()> {
+    gen: u64,
+    mut wake: watch::Receiver<u64>,
+) {
+    let handle = link.uplink();
     loop {
-        match connect_and_sync(&config, &cache, &events, &handle).await {
-            Ok(()) => warn!("bluebubbles connection closed, reconnecting"),
-            Err(e) => warn!("bluebubbles error: {e}, retry in 5s"),
+        if *wake.borrow() != gen {
+            return;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        link.set_connecting(true);
+        emit_sync_link(&events, &cache, &link.view().await).await;
+        tokio::select! {
+            result = connect_and_sync(&creds, &cache, &events, &handle, &link, gen, wake.clone()) => {
+                match result {
+                    Ok(()) => warn!("bluebubbles connection closed, reconnecting"),
+                    Err(e) => warn!("bluebubbles error: {e}, retry in 5s"),
+                }
+            }
+            _ = wait_new_gen(&mut wake, gen) => {
+                handle.detach().await;
+                return;
+            }
+        }
+        if *wake.borrow() != gen {
+            return;
+        }
+        link.set_connecting(false);
+        emit_sync_link(&events, &cache, &link.view().await).await;
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+            _ = wait_new_gen(&mut wake, gen) => return,
+        }
+    }
+}
+
+async fn wait_new_gen(wake: &mut watch::Receiver<u64>, gen: u64) {
+    loop {
+        if *wake.borrow() != gen {
+            return;
+        }
+        if wake.changed().await.is_err() {
+            return;
+        }
     }
 }
 
 async fn connect_and_sync(
-    config: &SyncConfig,
+    creds: &Credentials,
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
     handle: &UplinkHandle,
+    link: &Arc<Link>,
+    gen: u64,
+    mut wake: watch::Receiver<u64>,
 ) -> Result<()> {
-    let result = connect_and_sync_inner(config, cache, events, handle).await;
+    let result = tokio::select! {
+        r = connect_and_sync_inner(creds, cache, events, handle, link, gen, wake.clone()) => r,
+        _ = wait_new_gen(&mut wake, gen) => Ok(()),
+    };
     handle.detach().await;
-    let _ = set_link_state(cache, false, false, "").await;
+    let _ = set_link_state(cache, false, false, &last_error(&result)).await;
+    emit_sync_link(events, cache, &link.view().await).await;
     result
+}
+
+fn last_error(result: &Result<()>) -> String {
+    match result {
+        Ok(()) => String::new(),
+        Err(e) => link_error_code(e),
+    }
 }
 
 async fn set_link_state(
@@ -71,16 +120,16 @@ fn link_error_code(err: &impl ToString) -> String {
 
 async fn prefetch_cache(
     bb: &BlueBubbles,
-    config: &SyncConfig,
+    creds: &Credentials,
     cache: &Arc<RwLock<MessageCache>>,
 ) -> Result<()> {
-    let chats = bb.query_chats(config.prefetch_chats).await?;
+    let chats = bb.query_chats(creds.public.prefetch_chats).await?;
     for chat in chats {
         let guard = cache.write().await;
         guard.upsert_domain_chat(&chat).await?;
         drop(guard);
         let msgs = bb
-            .chat_messages(&chat.guid, config.prefetch_messages)
+            .chat_messages(&chat.guid, creds.public.prefetch_messages)
             .await?;
         let guard = cache.write().await;
         for msg in msgs {
@@ -91,17 +140,25 @@ async fn prefetch_cache(
 }
 
 async fn connect_and_sync_inner(
-    config: &SyncConfig,
+    creds: &Credentials,
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
     handle: &UplinkHandle,
+    link: &Arc<Link>,
+    gen: u64,
+    mut wake: watch::Receiver<u64>,
 ) -> Result<()> {
-    let bb = BlueBubbles::connect(config.clone()).await?;
+    if *wake.borrow() != gen {
+        return Ok(());
+    }
+    let bb = BlueBubbles::connect(creds.clone()).await?;
     info!("connected to BlueBubbles");
     handle.attach(Arc::clone(&bb)).await;
+    link.set_connecting(false);
     set_link_state(cache, true, false, "").await?;
+    emit_sync_link(events, cache, &link.view().await).await;
 
-    match prefetch_cache(&bb, config, cache).await {
+    match prefetch_cache(&bb, creds, cache).await {
         Ok(()) => {
             set_link_state(cache, true, true, "").await?;
             cache
@@ -109,10 +166,12 @@ async fn connect_and_sync_inner(
                 .await
                 .set_meta("contacts", "granted")
                 .await?;
+            emit_sync_link(events, cache, &link.view().await).await;
         }
         Err(e) => {
             warn!("prefetch failed, staying connected: {e}");
             set_link_state(cache, true, false, &link_error_code(&e)).await?;
+            emit_sync_link(events, cache, &link.view().await).await;
         }
     }
 
@@ -121,6 +180,10 @@ async fn connect_and_sync_inner(
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
+        if *wake.borrow() != gen {
+            sub.pump.abort();
+            return Ok(());
+        }
         tokio::select! {
             result = &mut sub.pump => {
                 return match result {
@@ -131,7 +194,7 @@ async fn connect_and_sync_inner(
             }
             msg = sub.events.recv() => {
                 let Some(msg) = msg else { break };
-                apply_live(msg, &bb, config, cache, events).await?;
+                apply_live(msg, &bb, creds, cache, events).await?;
             }
             _ = retry.tick() => {
                 let ready = cache
@@ -141,14 +204,22 @@ async fn connect_and_sync_inner(
                     .await?
                     .is_some_and(|v| v == "true");
                 if !ready {
-                    match prefetch_cache(&bb, config, cache).await {
-                        Ok(()) => set_link_state(cache, true, true, "").await?,
+                    match prefetch_cache(&bb, creds, cache).await {
+                        Ok(()) => {
+                            set_link_state(cache, true, true, "").await?;
+                            emit_sync_link(events, cache, &link.view().await).await;
+                        }
                         Err(e) => {
                             warn!("prefetch retry failed: {e}");
                             set_link_state(cache, true, false, &link_error_code(&e)).await?;
+                            emit_sync_link(events, cache, &link.view().await).await;
                         }
                     }
                 }
+            }
+            _ = wait_new_gen(&mut wake, gen) => {
+                sub.pump.abort();
+                return Ok(());
             }
         }
     }
@@ -172,12 +243,12 @@ fn sync_message_event(applied: Applied) -> Envelope {
 
 async fn reload_chats(
     bb: &BlueBubbles,
-    config: &SyncConfig,
+    creds: &Credentials,
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
     reason: &str,
 ) -> Result<()> {
-    let chats = bb.query_chats(config.prefetch_chats).await?;
+    let chats = bb.query_chats(creds.public.prefetch_chats).await?;
     let mut list = Vec::new();
     {
         let guard = cache.write().await;
@@ -196,7 +267,7 @@ async fn reload_chats(
 async fn apply_live(
     msg: Message,
     bb: &BlueBubbles,
-    config: &SyncConfig,
+    creds: &Credentials,
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
 ) -> Result<()> {
@@ -207,7 +278,7 @@ async fn apply_live(
     let unknown = matches!(applied.chat, ChatRow::Unknown { .. });
     let _ = events.send(sync_message_event(applied));
     if unknown {
-        if let Err(e) = reload_chats(bb, config, cache, events, "unknown_chat").await {
+        if let Err(e) = reload_chats(bb, creds, cache, events, "unknown_chat").await {
             warn!("reload chats after unknown chat: {e}");
         }
     }

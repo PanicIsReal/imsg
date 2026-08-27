@@ -10,7 +10,16 @@ function applySnapshot(result) {
       database_ready: !!(result && result.database_ready),
       last_error: (result && result.last_error) ? result.last_error : "",
       contacts: (result && result.contacts) ? result.contacts : "unknown"
-    }
+    },
+    settings: settingsFrom(result)
+  }
+}
+
+function settingsFrom(result) {
+  return {
+    server_url: (result && result.server_url) ? String(result.server_url) : "",
+    password_set: !!(result && result.password_set),
+    session: (result && result.session) ? String(result.session) : "unconfigured"
   }
 }
 
@@ -22,7 +31,12 @@ function applyEvent(state, event) {
     return { chats: chats, unreadCount: totalUnread(chats) }
   }
   if (event.topic === "sync.link") {
-    return { link: event.payload || {} }
+    var payload = event.payload || {}
+    var patch = { link: payload }
+    if (payload.server_url !== undefined || payload.password_set !== undefined || payload.session !== undefined) {
+      patch.settings = settingsFrom(payload)
+    }
+    return patch
   }
   return {}
 }
@@ -105,6 +119,15 @@ function setupGuide(s) {
       actionKind: ""
     }
   }
+  if (!s.passwordSet) {
+    return {
+      phase: "needs-settings",
+      title: "Link this machine",
+      body: "BlueBubbles URL and password. Saved in the system keyring.",
+      hint: "",
+      actionKind: "settings"
+    }
+  }
   if (!s.statusKnown) {
     return {
       phase: "checking",
@@ -126,8 +149,8 @@ function setupGuide(s) {
   return {
     phase: "needs-mac",
     title: "This machine is not linked",
-    body: "BlueBubbles is running on the Mac. Point this machine at it with the command below.",
+    body: "BlueBubbles is running on the Mac. Point this machine at it in Settings, or with the command below.",
     hint: "imsg setup connect --url http://<mac-tailscale-ip>:1234 --password <password>",
-    actionKind: ""
+    actionKind: "settings"
   }
 }

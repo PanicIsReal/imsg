@@ -1,6 +1,6 @@
 use crate::cache::MessageCache;
-use crate::client;
-use crate::config::SyncConfig;
+use crate::config::default_socket_path;
+use crate::link::{self, Link, Provision};
 use crate::socket_server;
 use anyhow::Result;
 use serde::Serialize;
@@ -8,35 +8,35 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub async fn run_daemon() -> Result<()> {
-    let config = SyncConfig::load()?;
-    let cache = MessageCache::open(&config.cache_path).await?;
+    let link = Link::boot()?;
+    let cache = MessageCache::open(link.cache_path()).await?;
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel(256);
     let cache = Arc::new(RwLock::new(cache));
-    let uplink = crate::uplink::UplinkHandle::default();
-
-    let client_cache = Arc::clone(&cache);
-    let client_config = config.clone();
-    let client_tx = event_tx.clone();
-    let client_uplink = uplink.clone();
-    tokio::spawn(async move {
-        if let Err(e) =
-            client::bridge_loop(client_config, client_cache, client_tx, client_uplink).await
-        {
-            tracing::error!("bridge loop: {e}");
-        }
-    });
-
-    socket_server::serve(config.socket_path, cache, event_tx, uplink).await
+    link.spawn_session(Arc::clone(&cache), event_tx.clone());
+    socket_server::serve(cache, event_tx, link).await
 }
 
 pub async fn status() -> Result<SyncStatus> {
-    let config = SyncConfig::load()?;
-    let cache = MessageCache::open(&config.cache_path).await?;
+    let ctx = link::production_ctx();
+    let provision = crate::link::store::load(&ctx).unwrap_or(Provision::Empty);
+    let (cache_path, bridge_url) = match &provision {
+        Provision::Ready(creds) => (
+            creds.public.cache_path.clone(),
+            creds.public.server.as_str().to_string(),
+        ),
+        Provision::Empty => (ctx.cache_path.clone(), String::new()),
+    };
+    let (chats, messages) = if cache_path.exists() {
+        let cache = MessageCache::open(&cache_path).await?;
+        (cache.chat_count().await?, cache.message_count().await?)
+    } else {
+        (0, 0)
+    };
     Ok(SyncStatus {
-        cache_path: config.cache_path.clone(),
-        bridge_url: config.server.as_str().to_string(),
-        chats: cache.chat_count().await?,
-        messages: cache.message_count().await?,
+        cache_path,
+        bridge_url,
+        chats,
+        messages,
     })
 }
 
@@ -74,14 +74,30 @@ pub fn doctor() -> Result<DoctorReport> {
         pass
     };
 
-    ok &= push("config", SyncConfig::path().exists(), "config.toml");
-    match SyncConfig::load() {
-        Ok(cfg) => {
-            ok &= push("server-url", true, cfg.server.as_str());
-            ok &= push("password", true, "set");
+    let ctx = link::production_ctx();
+    ok &= push("config", ctx.config_path.exists(), "config.toml");
+
+    match crate::link::store::peek_server_url(&ctx) {
+        Ok(Some(url)) => {
+            ok &= push("server-url", true, url.as_str());
+        }
+        Ok(None) => {
+            ok &= push("server-url", false, "not set");
         }
         Err(e) => {
             ok &= push("server-url", false, &e.to_string());
+        }
+    }
+
+    match crate::link::store::password_set(&ctx) {
+        Ok(true) => {
+            ok &= push("password", true, "set");
+        }
+        Ok(false) => {
+            ok &= push("password", false, "not set");
+        }
+        Err(e) => {
+            ok &= push("password", false, &e.to_string());
         }
     }
 
@@ -89,14 +105,13 @@ pub fn doctor() -> Result<DoctorReport> {
 }
 
 pub async fn request(method: &str, params: &str) -> Result<String> {
-    let config = SyncConfig::load()?;
     let params: serde_json::Value = serde_json::from_str(params)?;
     let req = imsg_proto::Envelope::Req {
         id: "1".into(),
         method: method.into(),
         params,
     };
-    let mut stream = tokio::net::UnixStream::connect(&config.socket_path).await?;
+    let mut stream = tokio::net::UnixStream::connect(default_socket_path()).await?;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     stream
         .write_all(format!("{}\n", req.to_line()?).as_bytes())

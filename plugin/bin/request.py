@@ -29,7 +29,7 @@ def request(method, params=None):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
+    if len(sys.argv) != 2:
         print(
             json.dumps(
                 {
@@ -38,12 +38,13 @@ if __name__ == "__main__":
                     "ok": False,
                     "error": {
                         "code": "usage",
-                        "message": "usage: request.py <method> [params_json]",
+                        "message": "usage: request.py <method>  (params JSON on stdin)",
                     },
                 }
             )
         )
         sys.exit(1)
     method = sys.argv[1]
-    params = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
+    raw = sys.stdin.readline() or "{}"
+    params = json.loads(raw)
     print(request(method, params))

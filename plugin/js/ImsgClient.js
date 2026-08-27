@@ -15,8 +15,12 @@ function scriptPath(resolvedUrl) {
   return decodeURIComponent(s)
 }
 
-function command(script, method, params) {
-  return ["/usr/bin/python3", script, method, JSON.stringify(params || {})]
+function command(script, method) {
+  return ["/usr/bin/python3", script, method]
+}
+
+function paramsPayload(params) {
+  return JSON.stringify(params || {})
 }
 
 function streamCommand(script) {
