@@ -20,6 +20,12 @@ Item {
   property string sendError: ""
   property string contacts: "unknown"
   property var pendingNotify: null
+  property var settings: ({
+    server_url: "",
+    password_set: false,
+    session: "unconfigured"
+  })
+  property bool settingsSaving: false
 
   readonly property bool cacheReady: chats && chats.length > 0
   readonly property string linkState: {
@@ -38,7 +44,8 @@ Item {
     bridgeConnected: root.bridgeConnected,
     databaseReady: root.databaseReady,
     lastError: root.lastError,
-    contacts: root.contacts
+    contacts: root.contacts,
+    passwordSet: !!(root.settings && root.settings.password_set)
   })
   readonly property string requestScript: {
     var resolved = ImsgClient.scriptPath(Qt.resolvedUrl("bin/request.py"))
@@ -86,49 +93,70 @@ Item {
         root.contacts = String(patch.link.contacts)
       }
     }
+    if (patch.settings !== undefined) {
+      root.settings = {
+        server_url: patch.settings.server_url ? String(patch.settings.server_url) : "",
+        password_set: !!patch.settings.password_set,
+        session: patch.settings.session ? String(patch.settings.session) : "unconfigured"
+      }
+    }
     if (patch.notify) {
       root.notifyInbound(patch.notify.sender, patch.notify.preview, patch.notify.chatId)
     }
   }
 
+  function startRequest(proc, method, params) {
+    if (requestScript === "" || proc.running) return false
+    proc.command = ImsgClient.command(requestScript, method)
+    proc.payload = ImsgClient.paramsPayload(params)
+    proc.running = true
+    return true
+  }
+
   function refreshChats() {
-    if (requestScript === "" || chatsProc.running) return
-    chatsProc.command = ImsgClient.command(requestScript, "chats.list", { limit: 50 })
-    chatsProc.running = true
+    startRequest(chatsProc, "chats.list", { limit: 50 })
   }
 
   function refreshStatus() {
-    if (requestScript === "" || statusProc.running) return
-    statusProc.command = ImsgClient.command(requestScript, "status", {})
-    statusProc.running = true
+    startRequest(statusProc, "status", {})
   }
 
   function loadMessages(chatId, before) {
-    if (!chatId || requestScript === "" || historyProc.running) return
+    if (!chatId) return
     var params = { chat_id: chatId, limit: 50 }
     if (before) params.before = before
     historyProc.beforeCursor = before || ""
-    historyProc.command = ImsgClient.command(requestScript, "messages.history", params)
-    historyProc.running = true
+    startRequest(historyProc, "messages.history", params)
   }
 
   function requestContactsAccess() {
-    if (requestScript === "" || contactsProc.running) return
     root.contacts = "prompting"
-    contactsProc.command = ImsgClient.command(requestScript, "contacts.authorize", {})
-    contactsProc.running = true
+    startRequest(contactsProc, "contacts.authorize", {})
   }
 
   function sendMessage(chatId, text) {
     if (!chatId || !text || text.trim().length === 0 || requestScript === "" || sendProc.running) return
     sendError = ""
     sendProc.chatId = chatId
-    sendProc.command = ImsgClient.command(requestScript, "messages.send", {
-      chat_id: chatId,
-      text: text.trim()
-    })
-    sendProc.running = true
-    sending = true
+    if (startRequest(sendProc, "messages.send", { chat_id: chatId, text: text.trim() })) {
+      sending = true
+    }
+  }
+
+  function saveSettings(url, password) {
+    if (requestScript === "" || settingsProc.running) return
+    var params = { server_url: url }
+    if (password !== undefined && password !== null && String(password).length > 0) {
+      params.password = String(password)
+    }
+    settingsSaving = true
+    startRequest(settingsProc, "config.set", params)
+  }
+
+  function reconnect() {
+    if (requestScript === "" || settingsProc.running) return
+    settingsSaving = true
+    startRequest(settingsProc, "config.reconnect", {})
   }
 
   function notifyInbound(sender, body, chatId) {
@@ -155,7 +183,13 @@ Item {
     id: chatsProc
     running: false
     command: []
+    property string payload: ""
     property string stderrText: ""
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -192,6 +226,12 @@ Item {
     id: statusProc
     running: false
     command: []
+    property string payload: ""
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -202,6 +242,11 @@ Item {
           root.lastError = ImsgClient.friendlyError(res.result.last_error)
           root.statusKnown = true
           if (res.result.contacts) root.contacts = String(res.result.contacts)
+          root.settings = {
+            server_url: res.result.server_url ? String(res.result.server_url) : "",
+            password_set: !!res.result.password_set,
+            session: res.result.session ? String(res.result.session) : "unconfigured"
+          }
         }
       }
     }
@@ -211,6 +256,12 @@ Item {
     id: contactsProc
     running: false
     command: []
+    property string payload: ""
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -231,7 +282,13 @@ Item {
     id: historyProc
     running: false
     command: []
+    property string payload: ""
     property string beforeCursor: ""
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -252,8 +309,14 @@ Item {
     id: sendProc
     running: false
     command: []
+    property string payload: ""
     property int chatId: 0
     property string stderrText: ""
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -277,6 +340,40 @@ Item {
         root.sendError = ImsgClient.friendlyError(sendProc.stderrText.trim() || ("send failed (code " + exitCode + ")"))
       }
       sendProc.stderrText = ""
+    }
+  }
+
+  Process {
+    id: settingsProc
+    running: false
+    command: []
+    property string payload: ""
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var res = ImsgClient.parseResponse(text)
+        if (res && res.ok && res.result) {
+          root.settings = {
+            server_url: res.result.server_url ? String(res.result.server_url) : root.settings.server_url,
+            password_set: res.result.password_set !== undefined ? !!res.result.password_set : root.settings.password_set,
+            session: res.result.session ? String(res.result.session) : root.settings.session
+          }
+          root.connected = true
+          if (res.result.last_error !== undefined) {
+            root.lastError = ImsgClient.friendlyError(res.result.last_error)
+          }
+        } else if (res && res.error) {
+          root.lastError = ImsgClient.friendlyError(res.error.message || "save failed")
+        }
+      }
+    }
+    onExited: function() {
+      root.settingsSaving = false
     }
   }
 

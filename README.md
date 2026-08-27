@@ -9,7 +9,7 @@ The Mac side is BlueBubbles Server. Edit `plugin/` here.
 
 ## Set up
 
-`imsg setup connect` is the Linux link. BlueBubbles Server is the Mac app.
+The iMessage panel Settings form is the Linux link. BlueBubbles Server is the Mac app. The BlueBubbles password is stored in the system keyring, never in `config.toml`.
 
 ### Mac
 
@@ -19,7 +19,9 @@ The Mac side is BlueBubbles Server. Edit `plugin/` here.
 
 ### Arch Linux
 
-Install `imsg` from the Linux release. Then:
+Install `imsg` from the Linux release. Start the local daemon (`imsg sync run` or the systemd unit). Open the iMessage panel and use Settings (the gear) to enter the BlueBubbles URL and password. First run shows that same form. Reconnect from Settings reloads the Mac link without restarting the daemon.
+
+`imsg setup connect` still writes the same store if you prefer the CLI:
 
 ```sh
 imsg setup connect --url http://<mac-tailscale-ip>:1234 --password <password>
