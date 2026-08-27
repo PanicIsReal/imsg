@@ -618,11 +618,46 @@ Panel {
 
                     Text {
                       width: parent.width
-                      visible: bubble.fromMe && (modelData.send_state === "sending" || modelData.send_state === "failed")
-                      text: modelData.send_state === "failed" ? "Not delivered" : "Sending"
-                      color: modelData.send_state === "failed" ? root.urgent : root.dim
+                      visible: bubble.fromMe && modelData.send_state === "sending"
+                      text: "Sending"
+                      color: root.dim
                       font.family: root.family
                       font.pixelSize: Style.font.caption
+                    }
+
+                    Column {
+                      width: parent.width
+                      spacing: Style.space(4)
+                      visible: bubble.fromMe && modelData.send_state === "failed"
+
+                      Text {
+                        width: parent.width
+                        text: "Not delivered"
+                        color: root.urgent
+                        font.family: root.family
+                        font.pixelSize: Style.font.caption
+                      }
+
+                      Row {
+                        spacing: Style.space(8)
+
+                        Button {
+                          text: "Retry"
+                          foreground: root.fg
+                          fontFamily: root.family
+                          fontSize: Style.font.caption
+                          enabled: imsg && !imsg.sending
+                          onClicked: if (imsg) imsg.retryOutgoing(modelData.id)
+                        }
+
+                        Button {
+                          text: "Remove"
+                          foreground: root.fg
+                          fontFamily: root.family
+                          fontSize: Style.font.caption
+                          onClicked: if (imsg) imsg.discardOutgoing(modelData.id)
+                        }
+                      }
                     }
                   }
                 }
@@ -702,12 +737,6 @@ Panel {
     }
     function onDisplayMessagesChanged() {
       if (root.pinThreadToEnd) root.stickThread()
-    }
-    function onFailedDraftChanged() {
-      if (!imsg || !imsg.failedDraft || imsg.failedDraft.length === 0) return
-      if (root.draftText.trim().length > 0) return
-      root.draftText = imsg.failedDraft
-      if (draftField) draftField.text = imsg.failedDraft
     }
   }
 

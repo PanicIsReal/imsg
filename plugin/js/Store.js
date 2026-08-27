@@ -183,3 +183,65 @@ function setupGuide(s) {
     actionKind: "settings"
   }
 }
+
+function copyOutgoing(row) {
+  var copy = {}
+  for (var k in row) copy[k] = row[k]
+  return copy
+}
+
+function findOutgoing(outgoing, id) {
+  outgoing = outgoing || []
+  var key = String(id || "")
+  for (var i = 0; i < outgoing.length; i++) {
+    if (String(outgoing[i].id) === key) return outgoing[i]
+  }
+  return null
+}
+
+function finishOutgoing(outgoing, id, ok) {
+  outgoing = outgoing || []
+  var key = String(id || "")
+  var next = []
+  for (var i = 0; i < outgoing.length; i++) {
+    var o = outgoing[i]
+    if (String(o.id) === key) {
+      if (ok) continue
+      var failed = copyOutgoing(o)
+      failed.send_state = "failed"
+      next.push(failed)
+    } else if (o.send_state !== "sent") {
+      next.push(o)
+    }
+  }
+  return next
+}
+
+function discardOutgoing(outgoing, id) {
+  outgoing = outgoing || []
+  var key = String(id || "")
+  var next = []
+  for (var i = 0; i < outgoing.length; i++) {
+    if (String(outgoing[i].id) !== key) next.push(outgoing[i])
+  }
+  return next
+}
+
+function markOutgoingSending(outgoing, id) {
+  outgoing = outgoing || []
+  var key = String(id || "")
+  var next = []
+  var found = false
+  for (var i = 0; i < outgoing.length; i++) {
+    var o = outgoing[i]
+    if (String(o.id) === key) {
+      var sending = copyOutgoing(o)
+      sending.send_state = "sending"
+      next.push(sending)
+      found = true
+    } else {
+      next.push(o)
+    }
+  }
+  return found ? next : outgoing
+}

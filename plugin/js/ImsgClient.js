@@ -27,19 +27,25 @@ function streamCommand(script) {
   return ["/usr/bin/python3", script]
 }
 
+function notificationText(value) {
+  var s = String(value == null ? "" : value).split("\0").join("")
+  if (s.charAt(0) === "-") s = "\u200B" + s
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+}
+
 function notificationCommand(sender, body, chatId) {
   return [
     "omarchy-notification-send",
     "--app-name", "iMessage",
     "--urgency", "normal",
     "-g", "󰍩",
-    String(sender || "iMessage"),
-    String(body || ""),
+    notificationText(sender || "iMessage"),
+    notificationText(body || ""),
     "--exec",
     "omarchy-shell",
     "io.github.panic.imessage",
     "openChat",
-    String(chatId || "0")
+    String(chatId || "0").split("\0").join("")
   ]
 }
 

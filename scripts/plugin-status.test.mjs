@@ -103,4 +103,32 @@ assert.notEqual(Client.friendlyError("database_unavailable"), "Mac Messages data
 assert.notEqual(Client.friendlyError("Full Disk Access required"), "Mac Messages database is locked")
 assert.notEqual(Client.friendlyError("Database unavailable"), "Mac Messages database is locked")
 
+assert.equal(typeof Client.notificationText, "function", "notificationText is missing")
+assert.equal(Client.notificationText("September 11&12"), "September 11&amp;12")
+assert.equal(Client.notificationText("<b>hi</b>"), "&lt;b&gt;hi&lt;/b&gt;")
+assert.equal(Client.notificationText("a>b"), "a&gt;b")
+assert.equal(Client.notificationText("ok"), "ok")
+assert.notEqual(Client.notificationText("--exec").charAt(0), "-")
+assert.notEqual(Client.notificationText("-g").charAt(0), "-")
+assert.equal(Client.notificationText("x\0y"), "xy")
+
+const toast = Client.notificationCommand("AT&T", "September 11&12", "99")
+assert.equal(toast[toast.indexOf("-g") + 2], "AT&amp;T")
+assert.equal(toast[toast.indexOf("-g") + 3], "September 11&amp;12")
+assert.equal(toast[toast.indexOf("--exec") + 1], "omarchy-shell")
+assert.ok(!toast.includes("<b>"))
+const inject = Client.notificationCommand("x", "<a href=\"javascript:alert(1)\">z</a>", "1")
+assert.ok(inject.some((part) => String(part).indexOf("&lt;a") !== -1))
+assert.ok(!inject.some((part) => String(part).indexOf("<a href") !== -1))
+
+const failed = Store.finishOutgoing(
+  [{ id: "pending-1", chat_id: "c", text: "hi", send_state: "sending" }],
+  "pending-1",
+  false,
+)
+assert.equal(failed[0].send_state, "failed")
+assert.equal(Store.discardOutgoing(failed, "pending-1").length, 0)
+assert.equal(Store.markOutgoingSending(failed, "pending-1")[0].send_state, "sending")
+assert.equal(Store.findOutgoing(failed, "pending-1").text, "hi")
+
 console.log("plugin-status.test.mjs ok")
