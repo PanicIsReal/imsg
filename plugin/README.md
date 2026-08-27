@@ -10,6 +10,10 @@ Edit the plugin in the [imsg monorepo](https://github.com/PanicIsReal/imsg) `plu
 
 Run [BlueBubbles Server](https://github.com/BlueBubblesApp/bluebubbles-server/releases/latest) on a Mac signed into iMessage. Grant it Full Disk Access. You do not need `bluebubbles-bin` on Linux. The plugin talks only to local `imsg-sync`.
 
+Start `imsg-sync` (`imsg sync run`). Open the panel and use Settings (the gear) to enter the BlueBubbles URL and password. The first-run empty state is that same form. The password is stored in the system keyring, not in `config.toml`. Reconnect from Settings reloads the Mac link.
+
+The CLI still works if you want it:
+
 ```sh
 imsg setup connect --url http://<mac-tailscale-ip>:1234 --password <bluebubbles-password>
 imsg sync run
@@ -25,7 +29,7 @@ Chats stay empty until `imsg-sync` can reach BlueBubbles. Then log out and back 
 
 ## Usage
 
-Click the bar icon to open the panel. The first run shows a setup card until a local cache exists. After that, select a conversation to read it. Type a reply and press Enter or Send when the Mac link is live.
+Click the bar icon to open the panel. The first run is Settings until this machine is linked. After chats are cached, select a conversation to read it. Type a reply and press Enter or Send when the Mac link is live. The gear opens Settings later; Reconnect retries the Mac without restarting sync.
 
 The bar icon shows the unread count once conversations are cached.
 

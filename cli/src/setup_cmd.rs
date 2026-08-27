@@ -72,22 +72,13 @@ pub async fn run(command: Option<SetupCommands>, json: bool) -> Result<()> {
         }
         Some(SetupCommands::Connect { url, password }) => {
             imsg_sync::install_crypto_provider();
-            let cfg = imsg_sync::config::SyncConfig::from_parts(&url, &password)?;
-            imsg_sync::bb::BlueBubbles::connect(cfg.clone())
-                .await
-                .with_context(|| format!("ping {}", cfg.server.as_str()))?;
-            cfg.save()?;
+            let draft = imsg_sync::link::SettingsDraft::from_input(&url, Some(&password))?;
+            let view = imsg_sync::link::commit(draft)?;
+            let _ = imsg_sync::link::nudge_running();
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "ok": true,
-                        "server_url": cfg.server.as_str(),
-                        "config": imsg_sync::config::SyncConfig::path().display().to_string(),
-                    })
-                );
+                println!("{}", serde_json::to_value(&view)?);
             } else {
-                println!("wrote {}", imsg_sync::config::SyncConfig::path().display());
+                println!("server {}", view.server_url.unwrap_or_default());
                 println!("start sync with: imsg sync run");
             }
             Ok(())

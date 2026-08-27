@@ -1,10 +1,10 @@
 use crate::cache::{ChatRow, MessageCache};
 use crate::domain::ChatGuid;
-use crate::uplink::{UplinkError, UplinkHandle};
+use crate::link::{emit_sync_link, merge_view, Link, SettingsDraft};
+use crate::uplink::UplinkError;
 use anyhow::{Context, Result};
 use imsg_proto::Envelope;
 use serde_json::{json, Value};
-use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -17,12 +17,11 @@ enum ClientMode {
 }
 
 pub async fn serve(
-    socket_path: impl AsRef<Path>,
     cache: Arc<RwLock<MessageCache>>,
     events: broadcast::Sender<Envelope>,
-    uplink: UplinkHandle,
+    link: Arc<Link>,
 ) -> Result<()> {
-    let socket_path = socket_path.as_ref();
+    let socket_path = link.socket_path();
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -34,9 +33,9 @@ pub async fn serve(
         let (stream, _) = listener.accept().await?;
         let cache = Arc::clone(&cache);
         let events = events.clone();
-        let uplink = uplink.clone();
+        let link = Arc::clone(&link);
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, cache, events, uplink).await {
+            if let Err(e) = handle_client(stream, cache, events, link).await {
                 tracing::warn!("client error: {e}");
             }
         });
@@ -47,7 +46,7 @@ async fn handle_client(
     stream: UnixStream,
     cache: Arc<RwLock<MessageCache>>,
     events: broadcast::Sender<Envelope>,
-    uplink: UplinkHandle,
+    link: Arc<Link>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(writer));
@@ -60,7 +59,7 @@ async fn handle_client(
                 tokio::select! {
                     line = lines.next_line() => {
                         let Some(line) = line? else { break };
-                        process_line(&line, &cache, &events, &uplink, &writer).await?;
+                        process_line(&line, &cache, &events, &link, &writer).await?;
                     }
                     evt = rx.recv() => {
                         match evt {
@@ -87,13 +86,13 @@ async fn handle_client(
                 };
                 if subscribe_requested(&line)? {
                     mode = ClientMode::Streaming(events.subscribe());
-                    let snap = snapshot(&cache).await?;
+                    let snap = snapshot(&cache, &link).await?;
                     let env = Envelope::parse_line(line.trim())?;
                     if let Envelope::Req { id, .. } = env {
                         write_env(&writer, &ok_res(&id, snap)).await?;
                     }
                 } else {
-                    process_line(&line, &cache, &events, &uplink, &writer).await?;
+                    process_line(&line, &cache, &events, &link, &writer).await?;
                 }
             }
         }
@@ -116,7 +115,7 @@ async fn process_line(
     line: &str,
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
-    uplink: &UplinkHandle,
+    link: &Arc<Link>,
     writer: &Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
 ) -> Result<()> {
     let line = line.trim();
@@ -126,11 +125,11 @@ async fn process_line(
     let env = Envelope::parse_line(line)?;
     if let Envelope::Req { id, method, params } = env {
         if method == "events.subscribe" {
-            let snap = snapshot(cache).await?;
+            let snap = snapshot(cache, link).await?;
             write_env(writer, &ok_res(&id, snap)).await?;
             return Ok(());
         }
-        let result = dispatch(cache, events, uplink, &method, params).await;
+        let result = dispatch(cache, events, link, &method, params).await;
         let reply = match result {
             Ok(v) => ok_res(&id, v),
             Err(e) => {
@@ -173,10 +172,12 @@ async fn write_env(
     Ok(())
 }
 
-async fn snapshot(cache: &Arc<RwLock<MessageCache>>) -> Result<Value> {
+async fn snapshot(cache: &Arc<RwLock<MessageCache>>, link: &Arc<Link>) -> Result<Value> {
     let guard = cache.read().await;
     let chats = guard.list_chats(50).await?;
     let mut snap = guard.link_snapshot().await?;
+    drop(guard);
+    merge_view(&mut snap, &link.view().await);
     if let Some(obj) = snap.as_object_mut() {
         obj.insert("chats".into(), json!(chats));
         obj.insert("protocol".into(), json!(imsg_proto::PROTOCOL_VERSION));
@@ -202,7 +203,7 @@ fn live_event(applied: crate::cache::Applied) -> Envelope {
 async fn dispatch(
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
-    uplink: &UplinkHandle,
+    link: &Arc<Link>,
     method: &str,
     params: Value,
 ) -> Result<Value> {
@@ -210,14 +211,29 @@ async fn dispatch(
         "status" => {
             let guard = cache.read().await;
             let mut snap = guard.link_snapshot().await?;
+            drop(guard);
             if let Some(obj) = snap.as_object_mut() {
                 obj.insert("connected".into(), json!(true));
                 obj.insert("protocol".into(), json!(imsg_proto::PROTOCOL_VERSION));
             }
+            merge_view(&mut snap, &link.view().await);
             Ok(snap)
         }
+        "config.set" => {
+            let url = params["server_url"].as_str().context("server_url required")?;
+            let password = params.get("password").and_then(|v| v.as_str());
+            let draft = SettingsDraft::from_input(url, password)?;
+            let view = link.apply(draft).await?;
+            emit_sync_link(events, cache, &view).await;
+            Ok(view.to_status_fields())
+        }
+        "config.reconnect" => {
+            let view = link.reconnect().await?;
+            emit_sync_link(events, cache, &view).await;
+            Ok(view.to_status_fields())
+        }
         "contacts.authorize" => {
-            if !uplink.is_up().await {
+            if !link.uplink().is_up().await {
                 return Err(UplinkError::LinkDown.into());
             }
             Ok(json!({"outcome": "granted", "names_visible": true}))
@@ -232,7 +248,7 @@ async fn dispatch(
                 .await?
                 .context("unknown chat")?;
             let guid = ChatGuid::parse(guid)?;
-            let msg = uplink.send_text(&guid, text).await?;
+            let msg = link.uplink().send_text(&guid, text).await?;
             let applied = cache.write().await.apply_domain_message(&msg).await?;
             let out = applied.message.clone();
             let _ = events.send(live_event(applied));
@@ -286,11 +302,12 @@ mod tests {
         tempfile::TempDir,
         std::path::PathBuf,
         broadcast::Sender<Envelope>,
+        Arc<Link>,
     ) {
         let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("imsg-sync.sock");
-        let db = dir.path().join("cache.db");
-        let cache = MessageCache::open(&db).await.unwrap();
+        let link = Link::boot_isolated(dir.path()).unwrap();
+        let sock = link.socket_path().to_path_buf();
+        let cache = MessageCache::open(link.cache_path()).await.unwrap();
         cache
             .upsert_chat(&json!({
                 "id": 1,
@@ -303,13 +320,13 @@ mod tests {
         let cache = Arc::new(RwLock::new(cache));
         let (tx, _) = broadcast::channel(16);
         let serve_tx = tx.clone();
-        let serve_sock = sock.clone();
+        let serve_link = Arc::clone(&link);
         tokio::spawn(async move {
-            let _ = serve(serve_sock, cache, serve_tx, UplinkHandle::default()).await;
+            let _ = serve(cache, serve_tx, serve_link).await;
         });
         for _ in 0..100 {
             if sock.exists() {
-                return (dir, sock, tx);
+                return (dir, sock, tx, link);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -328,9 +345,27 @@ mod tests {
             .unwrap();
     }
 
+    async fn read_res(stream: UnixStream) -> Envelope {
+        let mut lines = BufReader::new(stream).lines();
+        let line = timeout(Duration::from_secs(2), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        Envelope::parse_line(&line).unwrap()
+    }
+
+    fn assert_no_password_key(value: &Value) {
+        let obj = value.as_object().expect("object result");
+        assert!(
+            !obj.keys().any(|k| k.eq_ignore_ascii_case("password")),
+            "result leaked a password key: {value}"
+        );
+    }
+
     #[tokio::test]
     async fn oneshot_caller_never_receives_events() {
-        let (_dir, sock, events) = boot().await;
+        let (_dir, sock, events, _link) = boot().await;
         let mut stream = UnixStream::connect(&sock).await.unwrap();
         write_req(&mut stream, "chats.list", json!({"limit": 10})).await;
         let mut lines = BufReader::new(stream).lines();
@@ -363,7 +398,7 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_receives_snapshot_then_events() {
-        let (_dir, sock, events) = boot().await;
+        let (_dir, sock, events, _link) = boot().await;
         let mut stream = UnixStream::connect(&sock).await.unwrap();
         write_req(&mut stream, "events.subscribe", json!({})).await;
         let mut lines = BufReader::new(stream).lines();
@@ -404,21 +439,19 @@ mod tests {
 
     #[tokio::test]
     async fn status_and_snapshot_include_contacts_from_meta() {
-        let (_dir, sock, _events) = boot().await;
+        let (_dir, sock, _events, _link) = boot().await;
         let mut stream = UnixStream::connect(&sock).await.unwrap();
         write_req(&mut stream, "status", json!({})).await;
-        let mut lines = BufReader::new(stream).lines();
-        let line = timeout(Duration::from_secs(1), lines.next_line())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let env = Envelope::parse_line(&line).unwrap();
+        let env = read_res(stream).await;
         match env {
             Envelope::Res {
                 ok: true, result, ..
             } => {
-                assert_eq!(result.unwrap()["contacts"], "unknown");
+                let result = result.unwrap();
+                assert_eq!(result["contacts"], "unknown");
+                assert_eq!(result["session"], "unconfigured");
+                assert_eq!(result["password_set"], false);
+                assert_no_password_key(&result);
             }
             other => panic!("expected status res, got {other:?}"),
         }
@@ -426,16 +459,10 @@ mod tests {
 
     #[tokio::test]
     async fn contacts_authorize_without_uplink_is_link_down() {
-        let (_dir, sock, _events) = boot().await;
+        let (_dir, sock, _events, _link) = boot().await;
         let mut stream = UnixStream::connect(&sock).await.unwrap();
         write_req(&mut stream, "contacts.authorize", json!({})).await;
-        let mut lines = BufReader::new(stream).lines();
-        let line = timeout(Duration::from_secs(1), lines.next_line())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let env = Envelope::parse_line(&line).unwrap();
+        let env = read_res(stream).await;
         match env {
             Envelope::Res {
                 ok: false, error, ..
@@ -443,6 +470,63 @@ mod tests {
                 assert_eq!(error.unwrap().code, "link_down");
             }
             other => panic!("expected link_down, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn config_set_then_status_has_url_and_password_set_without_secret() {
+        let (_dir, sock, _events, _link) = boot().await;
+        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        write_req(
+            &mut stream,
+            "config.set",
+            json!({
+                "server_url": "100.64.1.2",
+                "password": "s3cret"
+            }),
+        )
+        .await;
+        let env = read_res(stream).await;
+        let result = match env {
+            Envelope::Res {
+                ok: true, result, ..
+            } => result.unwrap(),
+            other => panic!("expected config.set res, got {other:?}"),
+        };
+        assert_eq!(result["server_url"], "http://100.64.1.2:1234");
+        assert_eq!(result["password_set"], true);
+        assert_no_password_key(&result);
+
+        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        write_req(&mut stream, "status", json!({})).await;
+        let env = read_res(stream).await;
+        let result = match env {
+            Envelope::Res {
+                ok: true, result, ..
+            } => result.unwrap(),
+            other => panic!("expected status res, got {other:?}"),
+        };
+        assert_eq!(result["server_url"], "http://100.64.1.2:1234");
+        assert_eq!(result["password_set"], true);
+        assert_no_password_key(&result);
+    }
+
+    #[tokio::test]
+    async fn config_reconnect_on_empty_store_is_unconfigured() {
+        let (_dir, sock, _events, _link) = boot().await;
+        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        write_req(&mut stream, "config.reconnect", json!({})).await;
+        let env = read_res(stream).await;
+        match env {
+            Envelope::Res {
+                ok: true, result, ..
+            } => {
+                let result = result.unwrap();
+                assert_eq!(result["session"], "unconfigured");
+                assert_eq!(result["password_set"], false);
+                assert_no_password_key(&result);
+            }
+            other => panic!("expected config.reconnect res, got {other:?}"),
         }
     }
 }
