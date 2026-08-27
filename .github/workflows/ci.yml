@@ -10,6 +10,14 @@ permissions:
   contents: read
 
 jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate plugin
+        run: ./scripts/validate-plugin.sh
+
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 45
