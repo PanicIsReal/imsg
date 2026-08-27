@@ -1,6 +1,6 @@
 # imsg
 
-Monorepo for iMessage on Omarchy: Mac bridge, Linux sync, and the bar plugin.
+Monorepo for iMessage on Omarchy: BlueBubbles on the Mac, Linux sync, and the bar plugin.
 
 Work in this clone. Do not open `PanicIsReal/omarchy-imessage` to edit QML.
 That repo is a published copy of `plugin/` so `omarchy plugin add` can clone a

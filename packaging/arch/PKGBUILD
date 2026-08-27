@@ -1,7 +1,7 @@
 pkgname=imsg
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Omarchy iMessage bridge (Linux sync client)"
+pkgdesc="Linux iMessage sync daemon for Omarchy"
 arch=('x86_64')
 url="https://github.com/PanicIsReal/imsg"
 license=('MIT')
