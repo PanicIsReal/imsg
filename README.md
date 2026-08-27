@@ -2,30 +2,31 @@
 
 iMessage on Omarchy, over Tailscale.
 
-This is the monorepo: Mac bridge, Linux sync, and the Omarchy bar plugin.
-Edit `plugin/` here. `PanicIsReal/omarchy-imessage` is a published copy of
-that folder so `omarchy plugin add` can clone a tree with `manifest.json` at
-the git root.
+This is the monorepo: Linux sync plus the Omarchy bar plugin.
+The Mac side is BlueBubbles Server. Edit `plugin/` here.
+`PanicIsReal/omarchy-imessage` is a published copy of that folder so
+`omarchy plugin add` can clone a tree with `manifest.json` at the git root.
 
 ## Set up
 
-`imsg setup` is the product. Download a release, then run that.
+`imsg setup connect` is the Linux link. BlueBubbles Server is the Mac app.
 
 ### Mac
 
-1. Install [Ghostty](https://ghostty.org) and grant it Full Disk Access.
-2. Download `imsg-macos-aarch64.tar.gz` from [GitHub Releases](https://github.com/PanicIsReal/imsg/releases).
-3. Open **Imsg Setup**, or run `imsg setup` in Ghostty.
-4. Work the checklist. The pairing code stays on screen after enroll is up.
-5. When asked, connect Omarchy over SSH. The default host is `omarchy` if that SSH alias exists.
-
-The wizard installs Homebrew `steipete/tap/imsg` and the Mac LaunchAgent. It can install Linux `imsg` over SSH, pair, and enable the plugin. The client private key is created on Linux.
+1. Install [BlueBubbles Server](https://github.com/BlueBubblesApp/bluebubbles-server/releases/latest). Right-click Open the `.dmg`.
+2. Grant Full Disk Access. Set a server password. Leave the proxy off if you use Tailscale.
+3. Keep the Mac awake. Default port is 1234.
 
 ### Arch Linux
 
-If you skip SSH from the Mac, install the Linux binary from the same release. `packaging/arch/PKGBUILD` installs it to `/usr/bin/imsg`.
+Install `imsg` from the Linux release. Then:
 
-Pairing still starts on the Mac.
+```sh
+imsg setup connect --url http://<mac-tailscale-ip>:1234 --password <password>
+imsg sync run
+```
+
+You do not need `bluebubbles-bin` on Linux. The Omarchy plugin talks to local `imsg-sync` only.
 
 ## Releases
 

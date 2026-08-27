@@ -118,7 +118,7 @@ function setupGuide(s) {
     return {
       phase: "needs-fda",
       title: "Messages is locked on your Mac",
-      body: "Grant Full Disk Access to Ghostty, the window titled imsg-bridge-serve. The list appears after that.",
+      body: "Grant Full Disk Access to BlueBubbles on the Mac. The list appears after that.",
       hint: "",
       actionKind: ""
     }
@@ -126,8 +126,8 @@ function setupGuide(s) {
   return {
     phase: "needs-mac",
     title: "This machine is not linked",
-    body: "The Mac needs Homebrew imsg and a running bridge. After that, pair from here with imsg setup pair <code> --host <mac-tailscale-ip>.",
-    hint: "brew install steipete/tap/imsg",
+    body: "BlueBubbles is running on the Mac. Point this machine at it with the command below.",
+    hint: "imsg setup connect --url http://<mac-tailscale-ip>:1234 --password <password>",
     actionKind: ""
   }
 }

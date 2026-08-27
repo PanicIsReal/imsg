@@ -27,13 +27,14 @@ serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 toml = "0.8"
 libc = "0.2"
-rustls-pemfile = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2"
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

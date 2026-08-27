@@ -10,8 +10,8 @@ tree with `manifest.json` at the git root.
 
 | Path | What |
 |------|------|
-| `bridge/` | macOS daemon. Wraps `imsg rpc`, mTLS WebSocket, pairing. |
-| `sync/` | Linux daemon. Cache, uplink to the Mac, Unix socket for the plugin. |
+| `bridge/` | Legacy Mac daemon. Do not add features. Linux sync talks to BlueBubbles. |
+| `sync/` | Linux daemon. BlueBubbles REST, cache, Unix socket for the plugin. |
 | `proto/` | Shared wire types and `proto/v1.md`. |
 | `setup/` | Pairing / doctor / SSH push (`imsg setup`). |
 | `cli/` | The `imsg` binary. |
@@ -26,9 +26,9 @@ plugin is QML. Do not add Rust inside `plugin/` or network calls from QML.
 ## Boundaries
 
 - The plugin talks only to the local `imsg-sync` Unix socket.
-- `imsg-sync` is the only Linux process that talks to the Mac.
-- `imsg-bridge` is the only process that reads Messages / `chat.db`.
-- `proto/v1.md` is the wire contract. Change it before the crates.
+- `imsg-sync` is the only Linux process that talks to the Mac. It talks to BlueBubbles, not `imsg-bridge`.
+- BlueBubbles on the Mac is the only process that reads Messages / `chat.db`.
+- Parse BlueBubbles JSON in `sync/src/domain.rs`. Do not leak `dateCreated` or `chatIdentifier` to QML.
 
 ## Commands
 

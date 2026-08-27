@@ -8,15 +8,12 @@ Edit the plugin in the [imsg monorepo](https://github.com/PanicIsReal/imsg) `plu
 
 ## Prerequisites
 
-The Mac must have Homebrew `imsg` before the bridge can read Messages.
+Run [BlueBubbles Server](https://github.com/BlueBubblesApp/bluebubbles-server/releases/latest) on a Mac signed into iMessage. Grant it Full Disk Access. You do not need `bluebubbles-bin` on Linux. The plugin talks only to local `imsg-sync`.
 
 ```sh
-brew install steipete/tap/imsg
+imsg setup connect --url http://<mac-tailscale-ip>:1234 --password <bluebubbles-password>
+imsg sync run
 ```
-
-`imsg-bridge serve` installs that formula when Homebrew is already present. If Homebrew is missing, install it from https://brew.sh, then run the command above.
-
-The Mac bridge also needs Full Disk Access for Ghostty so it can read Messages. The plugin never asks for that permission itself.
 
 ## Install
 
@@ -24,7 +21,7 @@ The Mac bridge also needs Full Disk Access for Ghostty so it can read Messages. 
 omarchy plugin add https://github.com/PanicIsReal/omarchy-imessage.git --enable
 ```
 
-Chats stay empty until `imsg-sync` runs on this machine. Install the companion CLI from https://github.com/PanicIsReal/imsg. Pair the Mac bridge. Start `imsg-sync`. Then log out and back in so the bar picks up the widget.
+Chats stay empty until `imsg-sync` can reach BlueBubbles. Then log out and back in so the bar picks up the widget.
 
 ## Usage
 

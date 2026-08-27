@@ -34,7 +34,7 @@ pub async fn status() -> Result<SyncStatus> {
     let cache = MessageCache::open(&config.cache_path).await?;
     Ok(SyncStatus {
         cache_path: config.cache_path.clone(),
-        bridge_url: config.bridge_url.clone(),
+        bridge_url: config.server.as_str().to_string(),
         chats: cache.chat_count().await?,
         messages: cache.message_count().await?,
     })
@@ -62,7 +62,6 @@ pub struct DoctorReport {
 }
 
 pub fn doctor() -> Result<DoctorReport> {
-    let config = SyncConfig::load()?;
     let mut checks = Vec::new();
     let mut ok = true;
 
@@ -76,22 +75,15 @@ pub fn doctor() -> Result<DoctorReport> {
     };
 
     ok &= push("config", SyncConfig::path().exists(), "config.toml");
-    ok &= push("ca", config.ca_cert_path.exists(), "ca.pem");
-    ok &= push(
-        "client-cert",
-        config.client_cert_path.exists(),
-        "client.pem",
-    );
-    ok &= push(
-        "client-key",
-        config.client_key_path.exists(),
-        "client-key.pem",
-    );
-    ok &= push(
-        "bridge-url",
-        !config.bridge_url.is_empty(),
-        &config.bridge_url,
-    );
+    match SyncConfig::load() {
+        Ok(cfg) => {
+            ok &= push("server-url", true, cfg.server.as_str());
+            ok &= push("password", true, "set");
+        }
+        Err(e) => {
+            ok &= push("server-url", false, &e.to_string());
+        }
+    }
 
     Ok(DoctorReport { ok, checks })
 }

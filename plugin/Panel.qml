@@ -41,7 +41,7 @@ Panel {
   readonly property string statusLine: {
     if (!imsg) return ""
     if (imsg.sendError && imsg.sendError.length > 0) return imsg.sendError
-    if (imsg.linkState === "mac-locked") return "Messages is locked on your Mac. Grant Full Disk Access to Ghostty."
+    if (imsg.linkState === "mac-locked") return "Messages is locked on your Mac. Grant Full Disk Access to BlueBubbles."
     if (imsg.linkState === "mac-down") return "Showing saved messages. The Mac link is down."
     return ""
   }
