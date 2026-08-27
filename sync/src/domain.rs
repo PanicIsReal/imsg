@@ -106,6 +106,38 @@ impl Chat {
         })
     }
 
+    pub fn stub(
+        guid: ChatGuid,
+        handle: Option<Handle>,
+        last_message_at: Option<String>,
+        unread_count: u32,
+    ) -> Self {
+        let identifier = handle
+            .as_ref()
+            .map(|h| h.address.clone())
+            .unwrap_or_else(|| guid.as_str().to_string());
+        let display_name = handle.as_ref().and_then(|h| h.name.clone());
+        let is_group = guid.is_group();
+        Self {
+            guid,
+            identifier,
+            display_name,
+            participants: handle.into_iter().collect(),
+            last_message_at,
+            unread_count,
+            is_group,
+        }
+    }
+
+    pub fn stub_from_message(msg: &Message) -> Self {
+        Self::stub(
+            msg.chat.clone(),
+            msg.sender.clone(),
+            Some(msg.created_at.clone()).filter(|s| !s.is_empty()),
+            if msg.is_from_me { 0 } else { 1 },
+        )
+    }
+
     pub fn apply_contacts(&mut self, book: &ContactBook) {
         for handle in &mut self.participants {
             if handle.name.is_none() {
