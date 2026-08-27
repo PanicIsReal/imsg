@@ -99,7 +99,7 @@ impl Chat {
         let display_name = value["displayName"]
             .as_str()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| is_person_name(s))
             .map(str::to_string);
         let participants = parse_handles(&value["participants"]);
         let last_message_at = value
@@ -152,24 +152,21 @@ impl Chat {
 
     pub fn apply_contacts(&mut self, book: &ContactBook) {
         for handle in &mut self.participants {
-            if handle.name.is_none() {
-                if let Some(name) = book.lookup(&handle.address) {
-                    handle.name = Some(name.to_string());
-                }
-            }
+            apply_name(&mut handle.name, book.lookup(&handle.address));
         }
-        if self.display_name.is_none() {
-            if let Some(name) = book.lookup(&self.identifier) {
-                self.display_name = Some(name.to_string());
-            }
-        }
+        apply_name(&mut self.display_name, book.lookup(&self.identifier));
     }
 
     pub fn to_cache_json(&self, id: i64) -> Value {
         let name = self
             .display_name
             .clone()
-            .or_else(|| self.participants.iter().find_map(|h| h.name.clone()))
+            .filter(|n| is_person_name(n))
+            .or_else(|| {
+                self.participants
+                    .iter()
+                    .find_map(|h| h.name.clone().filter(|n| is_person_name(n)))
+            })
             .unwrap_or_else(|| self.identifier.clone());
         let participants: Vec<String> = self
             .participants
@@ -194,11 +191,7 @@ impl Chat {
 impl Message {
     pub fn apply_contacts(&mut self, book: &ContactBook) {
         if let Some(handle) = &mut self.sender {
-            if handle.name.is_none() {
-                if let Some(name) = book.lookup(&handle.address) {
-                    handle.name = Some(name.to_string());
-                }
-            }
+            apply_name(&mut handle.name, book.lookup(&handle.address));
         }
     }
 
@@ -344,9 +337,8 @@ fn parse_handle(value: Option<&Value>) -> Option<Handle> {
         name: v["displayName"]
             .as_str()
             .or(v["name"].as_str())
-            .or(v["uncanonicalizedId"].as_str())
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| is_person_name(s))
             .map(str::to_string),
     })
 }
@@ -389,12 +381,19 @@ pub struct ContactBook {
 impl ContactBook {
     pub fn from_bb(value: &Value) -> Self {
         let mut book = Self::default();
-        let Some(arr) = value.as_array() else {
-            return book;
+        let arr = match value {
+            Value::Array(arr) => arr.clone(),
+            Value::Object(map) => map
+                .get("contacts")
+                .or_else(|| map.get("data"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+            _ => return book,
         };
         for contact in arr {
-            let name = contact_display_name(contact);
-            if name.is_empty() {
+            let name = contact_display_name(&contact);
+            if !is_person_name(&name) {
                 continue;
             }
             let phones = contact["phoneNumbers"]
@@ -403,14 +402,8 @@ impl ContactBook {
                 .unwrap_or_default();
             let emails = contact["emails"].as_array().cloned().unwrap_or_default();
             for entry in phones.into_iter().chain(emails) {
-                let addr = entry
-                    .get("address")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| entry.as_str());
-                let Some(addr) = addr else { continue };
-                for key in address_keys(addr) {
-                    book.names.entry(key).or_insert_with(|| name.clone());
-                }
+                let Some(addr) = contact_address(&entry) else { continue };
+                book.record(&addr, &name);
             }
         }
         book
@@ -422,9 +415,83 @@ impl ContactBook {
             .find_map(|k| self.names.get(&k).map(String::as_str))
     }
 
+    pub fn record(&mut self, address: &str, name: &str) {
+        if !is_person_name(name) || address.trim().is_empty() {
+            return;
+        }
+        for key in address_keys(address) {
+            self.names.entry(key).or_insert_with(|| name.to_string());
+        }
+    }
+
+    pub fn seed_from_chat(&mut self, chat: &Chat) {
+        if chat.is_group {
+            for handle in &chat.participants {
+                if let Some(name) = handle.name.as_deref() {
+                    self.record(&handle.address, name);
+                }
+            }
+            return;
+        }
+        if let Some(name) = chat.display_name.as_deref() {
+            self.record(&chat.identifier, name);
+            for handle in &chat.participants {
+                self.record(&handle.address, name);
+            }
+        }
+        for handle in &chat.participants {
+            if let Some(name) = handle.name.as_deref() {
+                self.record(&handle.address, name);
+                self.record(&chat.identifier, name);
+            }
+        }
+    }
+
+    pub fn seed_from_cache_chat(&mut self, chat: &Value) {
+        if chat["is_group"].as_bool().unwrap_or(false) {
+            return;
+        }
+        let ident = chat["identifier"].as_str().unwrap_or("");
+        for key in ["contact_name", "display_name", "name"] {
+            if let Some(name) = chat[key].as_str().filter(|s| is_person_name(s)) {
+                self.record(ident, name);
+                break;
+            }
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
+}
+
+pub fn is_person_name(s: &str) -> bool {
+    s.chars().any(|c| c.is_alphabetic())
+}
+
+fn apply_name(slot: &mut Option<String>, from_book: Option<&str>) {
+    if slot.as_deref().is_some_and(is_person_name) {
+        return;
+    }
+    if let Some(name) = from_book.filter(|n| is_person_name(n)) {
+        *slot = Some(name.to_string());
+        return;
+    }
+    if slot.as_deref().is_some_and(|n| !is_person_name(n)) {
+        *slot = None;
+    }
+}
+
+fn contact_address(entry: &Value) -> Option<String> {
+    if let Some(s) = entry.as_str() {
+        return Some(s.to_string());
+    }
+    for key in ["address", "phoneNumber", "number", "unformatted", "digits", "email"] {
+        if let Some(s) = entry.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(s.to_string());
+        }
+    }
+    None
 }
 
 fn contact_display_name(contact: &Value) -> String {
@@ -522,6 +589,70 @@ mod tests {
         .unwrap();
         chat.apply_contacts(&book);
         assert_eq!(chat.to_cache_json(1)["contact_name"], "Pat Limp");
+    }
+
+    #[test]
+    fn handle_uncanonicalized_id_is_not_a_name() {
+        let msg = Message::from_bb(
+            &json!({
+                "guid": "MSG-DIGITS",
+                "text": "hi",
+                "isFromMe": false,
+                "dateCreated": 1_700_000_000_000i64,
+                "handle": {
+                    "address": "+17807929927",
+                    "uncanonicalizedId": "7807929927",
+                    "name": "7807929927"
+                },
+                "chats": [{"guid": "any;-;+17807929927"}]
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(msg.sender.as_ref().unwrap().address, "+17807929927");
+        assert_eq!(msg.sender.as_ref().unwrap().name, None);
+        assert!(!is_person_name("7807929927"));
+        assert!(!is_person_name("+17807929927"));
+        assert!(is_person_name("Dawson Coon"));
+        assert!(is_person_name("Wife 💕"));
+    }
+
+    #[test]
+    fn seed_from_chat_display_name_fills_live_handle() {
+        let chat = Chat::from_bb(&json!({
+            "guid": "any;-;+17807929927",
+            "chatIdentifier": "+17807929927",
+            "displayName": "Dawson Coon",
+            "participants": [{"address": "+17807929927"}]
+        }))
+        .unwrap();
+        let mut book = ContactBook::default();
+        book.seed_from_chat(&chat);
+        let mut msg = Message::from_bb(
+            &json!({
+                "guid": "MSG-LIVE",
+                "text": "hi",
+                "isFromMe": false,
+                "handle": {"address": "+17807929927", "uncanonicalizedId": "7807929927"},
+                "chats": [{"guid": "any;-;+17807929927"}]
+            }),
+            None,
+        )
+        .unwrap();
+        msg.apply_contacts(&book);
+        assert_eq!(msg.sender.as_ref().unwrap().name.as_deref(), Some("Dawson Coon"));
+        assert_eq!(msg.to_cache_json(1, 1)["sender_name"], "Dawson Coon");
+
+        let mut group_book = ContactBook::default();
+        let group = Chat::from_bb(&json!({
+            "guid": "any;+;abc",
+            "chatIdentifier": "abc",
+            "displayName": "Dream Team 2.0",
+            "participants": [{"address": "+17808419350"}]
+        }))
+        .unwrap();
+        group_book.seed_from_chat(&group);
+        assert_eq!(group_book.lookup("+17808419350"), None);
     }
 
     #[test]

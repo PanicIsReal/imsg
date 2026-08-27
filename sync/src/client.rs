@@ -1,6 +1,6 @@
 use crate::bb::BlueBubbles;
 use crate::cache::{Applied, ChatRow, MessageCache};
-use crate::domain::Message;
+use crate::domain::{ContactBook, Message};
 use crate::link::{emit_sync_link, Credentials, Link};
 use crate::uplink::UplinkHandle;
 use anyhow::Result;
@@ -124,26 +124,7 @@ async fn prefetch_cache(
     cache: &Arc<RwLock<MessageCache>>,
 ) -> Result<()> {
     let mut chats = bb.query_chats(creds.public.prefetch_chats).await?;
-    match bb.query_contacts().await {
-        Ok(book) if !book.is_empty() => {
-            for chat in &mut chats {
-                chat.apply_contacts(&book);
-            }
-            cache
-                .write()
-                .await
-                .set_meta("contacts", "granted")
-                .await?;
-        }
-        Ok(_) => {
-            cache
-                .write()
-                .await
-                .set_meta("contacts", "unavailable")
-                .await?;
-        }
-        Err(e) => warn!("contacts fetch failed: {e}"),
-    }
+    let book = bind_names(bb, cache, &mut chats).await?;
     for chat in chats {
         let guard = cache.write().await;
         guard.upsert_domain_chat(&chat).await?;
@@ -152,11 +133,46 @@ async fn prefetch_cache(
             .chat_messages(&chat.guid, creds.public.prefetch_messages)
             .await?;
         let guard = cache.write().await;
-        for msg in msgs {
+        for mut msg in msgs {
+            msg.apply_contacts(&book);
             guard.upsert_domain_message(&msg).await?;
         }
     }
+    cache.write().await.apply_contact_book(&book).await?;
     Ok(())
+}
+
+async fn bind_names(
+    bb: &BlueBubbles,
+    cache: &Arc<RwLock<MessageCache>>,
+    chats: &mut [crate::domain::Chat],
+) -> Result<crate::domain::ContactBook> {
+    let mut book = match bb.query_contacts().await {
+        Ok(book) => book,
+        Err(e) => {
+            warn!("contacts fetch failed: {e}");
+            ContactBook::default()
+        }
+    };
+    for chat in chats.iter() {
+        book.seed_from_chat(chat);
+    }
+    if let Ok(cached) = cache.read().await.list_chats(500).await {
+        for chat in cached {
+            book.seed_from_cache_chat(&chat);
+        }
+    }
+    for chat in chats.iter_mut() {
+        chat.apply_contacts(&book);
+    }
+    bb.replace_contacts(book.clone()).await;
+    let label = if book.is_empty() {
+        "unavailable"
+    } else {
+        "granted"
+    };
+    cache.write().await.set_meta("contacts", label).await?;
+    Ok(book)
 }
 
 async fn connect_and_sync_inner(
@@ -263,7 +279,8 @@ async fn reload_chats(
     events: &broadcast::Sender<Envelope>,
     reason: &str,
 ) -> Result<()> {
-    let chats = bb.query_chats(creds.public.prefetch_chats).await?;
+    let mut chats = bb.query_chats(creds.public.prefetch_chats).await?;
+    let book = bind_names(bb, cache, &mut chats).await?;
     let mut list = Vec::new();
     {
         let guard = cache.write().await;
@@ -271,6 +288,7 @@ async fn reload_chats(
             let id = guard.upsert_domain_chat(&chat).await?;
             list.push(chat.to_cache_json(id));
         }
+        let _ = guard.apply_contact_book(&book).await;
     }
     let _ = events.send(Envelope::Event {
         topic: "sync.chats".into(),

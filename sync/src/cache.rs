@@ -1,5 +1,5 @@
 use anyhow::Result;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
 use std::path::Path;
@@ -72,6 +72,7 @@ impl MessageCache {
         cache.repair_message_projections().await?;
         cache.rebuild_identities().await?;
         cache.repair_orphan_chats().await?;
+        cache.repair_phone_sender_names().await?;
         Ok(cache)
     }
 
@@ -127,6 +128,52 @@ impl MessageCache {
             });
             let stub = crate::domain::Chat::stub(chat_guid, handle, last_at, 0);
             self.upsert_domain_chat(&stub).await?;
+        }
+        Ok(())
+    }
+
+    async fn repair_phone_sender_names(&self) -> Result<()> {
+        let chats = self.list_chats(500).await?;
+        let mut titles = std::collections::HashMap::new();
+        for chat in chats {
+            let id = crate::domain::parse_json_id(&chat["id"]).unwrap_or(0);
+            if chat["is_group"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            for key in ["contact_name", "display_name", "name"] {
+                if let Some(name) = chat[key].as_str().filter(|n| crate::domain::is_person_name(n)) {
+                    titles.insert(id, name.to_string());
+                    break;
+                }
+            }
+        }
+        let rows = sqlx::query("SELECT id, chat_id, sender_name, is_from_me, raw_json FROM messages")
+            .fetch_all(&self.pool)
+            .await?;
+        for row in rows {
+            let from_me: i64 = row.get("is_from_me");
+            if from_me != 0 {
+                continue;
+            }
+            let chat_id: i64 = row.get("chat_id");
+            let Some(name) = titles.get(&chat_id) else {
+                continue;
+            };
+            let sender_name: Option<String> = row.get("sender_name");
+            if sender_name.as_deref() == Some(name.as_str()) {
+                continue;
+            }
+            let id: i64 = row.get("id");
+            let raw: String = row.get("raw_json");
+            let mut json: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
+            json["sender_name"] = Value::String(name.clone());
+            let patched = serde_json::to_string(&json)?;
+            sqlx::query("UPDATE messages SET sender_name = ?, raw_json = ? WHERE id = ?")
+                .bind(name)
+                .bind(&patched)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
         }
         Ok(())
     }
@@ -234,7 +281,27 @@ impl MessageCache {
                 .await?;
         }
         let id = self.id_for_guid(msg.guid.as_str()).await?;
-        self.apply_live_message(&msg.to_cache_json(id, chat_id)).await
+        let mut json = msg.to_cache_json(id, chat_id);
+        if !crate::domain::is_person_name(json["sender_name"].as_str().unwrap_or("")) {
+            if let Some(row) = sqlx::query("SELECT raw_json FROM chats WHERE id = ?")
+                .bind(chat_id)
+                .fetch_optional(&self.pool)
+                .await?
+            {
+                let s: String = row.get("raw_json");
+                if let Ok(chat) = serde_json::from_str::<Value>(&s) {
+                    if !chat["is_group"].as_bool().unwrap_or(false) {
+                        for key in ["contact_name", "display_name", "name"] {
+                            if let Some(name) = chat[key].as_str().filter(|n| crate::domain::is_person_name(n)) {
+                                json["sender_name"] = Value::String(name.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.apply_live_message(&json).await
     }
 
     async fn repair_message_projections(&self) -> Result<()> {
@@ -263,7 +330,35 @@ impl MessageCache {
 
     pub async fn upsert_chat(&self, chat: &Value) -> Result<()> {
         let id = crate::domain::parse_json_id(&chat["id"]).unwrap_or(0);
-        let raw = serde_json::to_string(chat)?;
+        let mut chat = chat.clone();
+        if let Some(row) = sqlx::query("SELECT raw_json FROM chats WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+        {
+            let s: String = row.get("raw_json");
+            if let Ok(existing) = serde_json::from_str::<Value>(&s) {
+                let keep = existing["contact_name"]
+                    .as_str()
+                    .or(existing["name"].as_str())
+                    .unwrap_or("");
+                let incoming = chat["contact_name"]
+                    .as_str()
+                    .or(chat["name"].as_str())
+                    .unwrap_or("");
+                if crate::domain::is_person_name(keep) && !crate::domain::is_person_name(incoming) {
+                    chat["name"] = existing["name"].clone();
+                    chat["contact_name"] = existing["contact_name"].clone();
+                    if existing["display_name"]
+                        .as_str()
+                        .is_some_and(crate::domain::is_person_name)
+                    {
+                        chat["display_name"] = existing["display_name"].clone();
+                    }
+                }
+            }
+        }
+        let raw = serde_json::to_string(&chat)?;
         sqlx::query(
             r#"INSERT INTO chats (id, guid, name, identifier, service, last_message_at, unread_count, participants_json, raw_json)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -408,7 +503,11 @@ impl MessageCache {
     }
 
     pub async fn apply_contact_book(&self, book: &crate::domain::ContactBook) -> Result<u32> {
+        let mut book = book.clone();
         let chats = self.list_chats(500).await?;
+        for chat in &chats {
+            book.seed_from_cache_chat(chat);
+        }
         let mut n = 0u32;
         for mut chat in chats {
             let ident = chat["identifier"].as_str().unwrap_or("").to_string();
@@ -422,11 +521,15 @@ impl MessageCache {
             if current == name {
                 continue;
             }
+            if crate::domain::is_person_name(current) && current != name {
+                continue;
+            }
             chat["name"] = Value::String(name.to_string());
             chat["contact_name"] = Value::String(name.to_string());
             self.upsert_chat(&chat).await?;
             n += 1;
         }
+        self.repair_phone_sender_names().await?;
         Ok(n)
     }
 
@@ -558,6 +661,15 @@ fn merge_message(existing: Option<Value>, incoming: &Value) -> Value {
         }
         if k == "created_at" && v.as_str().is_none_or(|s| s.is_empty()) {
             continue;
+        }
+        if k == "sender_name" {
+            let incoming = v.as_str().unwrap_or("");
+            let existing = obj.get("sender_name").and_then(|x| x.as_str()).unwrap_or("");
+            if !crate::domain::is_person_name(incoming)
+                && (crate::domain::is_person_name(existing) || incoming.is_empty())
+            {
+                continue;
+            }
         }
         obj.insert(k.clone(), v.clone());
     }
@@ -785,6 +897,81 @@ mod tests {
         };
         assert_eq!(chat["contact_name"], "Nelson Muse");
         assert_eq!(cache.list_chats(10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn live_message_takes_sender_name_from_chat_when_handle_is_digits() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache.db");
+        let cache = MessageCache::open(&path).await.unwrap();
+        cache
+            .upsert_chat(&serde_json::json!({
+                "id": 1,
+                "guid": "any;-;+17807929927",
+                "name": "Dawson Coon",
+                "contact_name": "Dawson Coon",
+                "identifier": "+17807929927",
+                "unread_count": 0
+            }))
+            .await
+            .unwrap();
+        let msg = crate::domain::Message::from_bb(
+            &serde_json::json!({
+                "guid": "MSG-NOTIFY",
+                "text": "He said he can’t",
+                "isFromMe": false,
+                "dateCreated": 1_700_000_000_000i64,
+                "handle": {
+                    "address": "+17807929927",
+                    "uncanonicalizedId": "7807929927",
+                    "name": "7807929927"
+                },
+                "chats": [{"guid": "any;-;+17807929927"}]
+            }),
+            None,
+        )
+        .unwrap();
+        let applied = cache.apply_domain_message(&msg).await.unwrap();
+        assert_eq!(applied.message["sender_name"], "Dawson Coon");
+        let ChatRow::Updated(chat) = applied.chat else {
+            panic!("expected updated chat");
+        };
+        assert_eq!(chat["contact_name"], "Dawson Coon");
+    }
+
+    #[tokio::test]
+    async fn open_repairs_digit_sender_names_from_chat_title() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache.db");
+        {
+            let cache = MessageCache::open(&path).await.unwrap();
+            cache
+                .upsert_chat(&serde_json::json!({
+                    "id": 1,
+                    "guid": "any;-;+17807929927",
+                    "name": "Dawson Coon",
+                    "contact_name": "Dawson Coon",
+                    "identifier": "+17807929927"
+                }))
+                .await
+                .unwrap();
+            cache
+                .apply_live_message(&serde_json::json!({
+                    "id": 10,
+                    "chat_id": 1,
+                    "guid": "MSG-DIGITS",
+                    "text": "yo",
+                    "sender": "+17807929927",
+                    "sender_name": "7807929927",
+                    "created_at": "2026-08-27T22:40:47.153Z",
+                    "is_from_me": false
+                }))
+                .await
+                .unwrap();
+        }
+        let cache = MessageCache::open(&path).await.unwrap();
+        let msgs = cache.list_messages(1, 10, None).await.unwrap();
+        assert_eq!(msgs[0]["sender_name"], "Dawson Coon");
     }
 
     #[tokio::test]

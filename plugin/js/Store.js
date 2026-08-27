@@ -53,7 +53,7 @@ function applyMessage(state, payload) {
   }
   if (payload.is_new && msg && msg.is_from_me !== true && String(msg.chat_id) !== String(state.openChatId)) {
     patch.notify = {
-      sender: msg.sender_name || (payload.chat && payload.chat.contact_name) || msg.sender || "iMessage",
+      sender: notifySender(msg, payload.chat || findChat(state.chats, msg.chat_id)),
       preview: msg.text || "",
       chatId: msg.chat_id
     }
@@ -91,6 +91,26 @@ function appendMessage(messages, msg) {
     }
   }
   return messages.concat([msg])
+}
+
+function isPersonName(value) {
+  return /[A-Za-z]/.test(String(value || ""))
+}
+
+function findChat(chats, chatId) {
+  chats = chats || []
+  for (var i = 0; i < chats.length; i++) {
+    if (String(chats[i].id) === String(chatId || "")) return chats[i]
+  }
+  return null
+}
+
+function notifySender(msg, chat) {
+  if (isPersonName(msg && msg.sender_name)) return msg.sender_name
+  if (isPersonName(chat && chat.contact_name)) return chat.contact_name
+  if (isPersonName(chat && chat.display_name)) return chat.display_name
+  if (isPersonName(chat && chat.name)) return chat.name
+  return String((msg && msg.sender) || "iMessage")
 }
 
 function totalUnread(chats) {

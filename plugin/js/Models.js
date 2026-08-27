@@ -9,11 +9,15 @@ function hasId(id) {
   return s.length > 0 && s !== "0"
 }
 
+function isPersonName(value) {
+  return /[A-Za-z]/.test(String(value || ""))
+}
+
 function chatTitle(chat) {
   if (!chat) return "Chat"
-  if (chat.contact_name && chat.contact_name.length > 0) return chat.contact_name
-  if (chat.display_name && chat.display_name.length > 0) return chat.display_name
-  if (chat.name && chat.name.length > 0) return chat.name
+  if (isPersonName(chat.contact_name)) return chat.contact_name
+  if (isPersonName(chat.display_name)) return chat.display_name
+  if (isPersonName(chat.name)) return chat.name
   if (chat.is_group && chat.participants && chat.participants.length > 0) {
     var names = []
     for (var i = 0; i < Math.min(chat.participants.length, 3); i++) {

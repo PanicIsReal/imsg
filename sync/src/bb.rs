@@ -105,6 +105,10 @@ impl BlueBubbles {
         self.contacts.read().await.clone()
     }
 
+    pub async fn replace_contacts(&self, book: ContactBook) {
+        *self.contacts.write().await = book;
+    }
+
     pub async fn chat_messages(&self, chat: &ChatGuid, limit: u32) -> Result<Vec<Message>, BbError> {
         let encoded = path_encode(chat.as_str());
         let body = self
