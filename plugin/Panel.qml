@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import Quickshell
 import qs.Commons
 import qs.Ui
@@ -15,10 +16,13 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
   property var imsg: null
-  property int selectedChatId: 0
+  property var selectedChatId: ""
   property string draftText: ""
   property int phraseIndex: 0
   property bool settingsOpen: false
+  property bool pinThreadToEnd: true
+  property bool stickingThread: false
+  property int stickGen: 0
 
   readonly property var barIdentity: hostWidget || root
   readonly property color fg: bar ? bar.foreground : Color.foreground
@@ -30,9 +34,9 @@ Panel {
   readonly property color normalFill: Style.normalFillFor(fg, Color.accent)
 
   readonly property string currentTitle: {
-    if (!imsg || !imsg.chats || selectedChatId <= 0) return ""
+    if (!imsg || !imsg.chats || !Models.hasId(selectedChatId)) return ""
     for (var i = 0; i < imsg.chats.length; i++) {
-      if (imsg.chats[i].id === selectedChatId) return Models.chatTitle(imsg.chats[i])
+      if (Models.sameId(imsg.chats[i].id, selectedChatId)) return Models.chatTitle(imsg.chats[i])
     }
     return ""
   }
@@ -41,9 +45,8 @@ Panel {
     cacheReady: false,
     statusKnown: false,
     bridgeConnected: false,
-    databaseReady: false,
-    lastError: "",
     contacts: "unknown",
+    namesVisible: false,
     passwordSet: false
   })
   readonly property bool settingsVisible: root.settingsOpen || root.setupGuide.phase === "needs-settings"
@@ -57,7 +60,6 @@ Panel {
   readonly property string heroMeta: {
     if (!imsg) return "Starting"
     if (imsg.linkState === "live") return livePhrases[phraseIndex % livePhrases.length]
-    if (imsg.linkState === "mac-locked") return "Messages is locked"
     if (imsg.linkState === "mac-down") return "Mac link is down"
     if (imsg.linkState === "sync-down") return "Sync is down"
     if (imsg.linkState === "checking") return "Checking the Mac"
@@ -70,13 +72,12 @@ Panel {
   readonly property string statusLine: {
     if (!imsg) return ""
     if (imsg.sendError && imsg.sendError.length > 0) return imsg.sendError
-    if (imsg.linkState === "mac-locked") return "Grant Full Disk Access to BlueBubbles on the Mac."
     if (imsg.linkState === "mac-down") return "Showing saved messages. The Mac link is down."
     return ""
   }
 
   function maybeSelectFirst() {
-    if (selectedChatId > 0 || !imsg || !imsg.chats || imsg.chats.length === 0) return
+    if (Models.hasId(selectedChatId) || !imsg || !imsg.chats || imsg.chats.length === 0) return
     openChat(imsg.chats[0].id)
   }
 
@@ -85,13 +86,13 @@ Panel {
     if (imsg) {
       imsg.refreshChats()
       imsg.refreshStatus()
-      if (selectedChatId > 0) openChat(selectedChatId)
+      if (Models.hasId(selectedChatId)) openChat(selectedChatId)
       else maybeSelectFirst()
     }
   }
 
   function close() {
-    if (imsg) imsg.openChatId = 0
+    if (imsg) imsg.openChatId = ""
     root.controller.hide()
   }
 
@@ -107,29 +108,82 @@ Panel {
   }
 
   function openChat(chatId) {
-    selectedChatId = chatId
+    selectedChatId = String(chatId || "")
     draftText = ""
+    root.pinThreadToEnd = true
     if (imsg) {
-      imsg.openChatId = chatId
-      imsg.loadMessages(chatId, null)
+      imsg.openChatId = selectedChatId
+      imsg.markRead(selectedChatId)
+      imsg.loadMessages(selectedChatId, null)
     }
+    root.stickThread()
   }
 
   function sendDraft() {
-    if (!imsg || selectedChatId <= 0 || draftText.trim().length === 0) return
-    imsg.sendMessage(selectedChatId, draftText)
-    draftText = ""
+    if (!imsg || !Models.hasId(selectedChatId) || draftText.trim().length === 0 || imsg.sending) return
+    var text = draftText
+    root.draftText = ""
+    if (draftField) draftField.text = ""
+    imsg.sendMessage(selectedChatId, text)
+    root.stickThread()
+    root.focusComposer()
+  }
+
+  function pickAttachment() {
+    if (!Models.hasId(selectedChatId) || (imsg && imsg.sending)) return
+    photoDialog.open()
+  }
+
+  function focusComposer() {
+    if (root.settingsVisible) return
+    if (Models.hasId(selectedChatId) && draftField.enabled) draftField.forceActiveFocus()
+    else keyCatcher.forceActiveFocus()
+  }
+
+  function blurComposer() {
+    keyCatcher.forceActiveFocus()
+  }
+
+  function threadAtEnd() {
+    if (!threadView || threadView.height <= 0) return true
+    return (threadView.contentHeight - threadView.height - threadView.contentY) <= 24
+  }
+
+  function stickThread() {
+    if (!root.pinThreadToEnd || !threadView) return
+    var gen = ++root.stickGen
+    root.stickingThread = true
+    if (threadView.count > 0) threadView.positionViewAtIndex(threadView.count - 1, ListView.End)
+    Qt.callLater(function () {
+      if (gen !== root.stickGen) return
+      if (root.pinThreadToEnd && threadView.count > 0)
+        threadView.positionViewAtIndex(threadView.count - 1, ListView.End)
+      root.stickingThread = false
+    })
+  }
+
+  function composerKey(event) {
+    if (event.key === Qt.Key_Escape) {
+      root.blurComposer()
+      event.accepted = true
+      return
+    }
+    if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+      root.switchPanel((event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab ? -1 : 1)
+      event.accepted = true
+    }
   }
 
   function moveChat(delta) {
     if (!imsg || !imsg.chats || imsg.chats.length === 0 || delta === 0) return
     var i = 0
     for (; i < imsg.chats.length; i++) {
-      if (imsg.chats[i].id === selectedChatId) break
+      if (Models.sameId(imsg.chats[i].id, selectedChatId)) break
     }
     if (i >= imsg.chats.length) i = 0
     var n = Math.max(0, Math.min(imsg.chats.length - 1, i + delta))
     openChat(imsg.chats[n].id)
+    chatList.positionViewAtIndex(n, ListView.Contain)
   }
 
   function call(method, args) {
@@ -178,20 +232,25 @@ Panel {
     open: root.opened
     centerOnBar: true
     gap: Style.space(16)
-    focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(720))
     contentHeight: panel.cappedContentHeight(Style.space(540))
+    focusTarget: keyCatcher
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       clip: true
-      blocked: draftField.activeFocus || settingsForm.editing
+      blocked: settingsForm.editing || draftField.activeFocus
       onMoveRequested: function(dx, dy) {
+        if (dx > 0) root.focusComposer()
         if (dy !== 0) root.moveChat(dy)
       }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      onReturnRequested: root.focusComposer()
+      onTextKey: function(t) {
+        if (t === "a") root.pickAttachment()
+      }
 
       Column {
         id: column
@@ -321,6 +380,10 @@ Panel {
               clip: true
               spacing: Style.space(6)
               boundsBehavior: Flickable.StopAtBounds
+              highlightFollowsCurrentItem: false
+              currentIndex: -1
+              focus: false
+              activeFocusOnTab: false
               ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
               delegate: CursorSurface {
@@ -328,7 +391,7 @@ Panel {
                 width: chatList.width
                 implicitHeight: chatInfo.implicitHeight + Style.spacing.rowPaddingX
                 hasCursor: false
-                current: root.selectedChatId === modelData.id
+                current: Models.sameId(root.selectedChatId, modelData.id)
                 foreground: root.fg
                 fill: root.hoverFill
                 currentFill: root.selectedFill
@@ -467,17 +530,27 @@ Panel {
               anchors.right: parent.right
               anchors.bottom: composerRow.top
               anchors.bottomMargin: Style.space(8)
-              model: imsg ? imsg.messages : []
+              model: imsg ? imsg.displayMessages : []
               clip: true
               spacing: Style.space(6)
               boundsBehavior: Flickable.StopAtBounds
+              highlightFollowsCurrentItem: false
+              currentIndex: -1
+              focus: false
+              activeFocusOnTab: false
               ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-              onCountChanged: if (count > 0) positionViewAtEnd()
+              onCountChanged: if (root.pinThreadToEnd) root.stickThread()
+              onContentHeightChanged: if (root.pinThreadToEnd) root.stickThread()
+              onContentYChanged: {
+                if (root.stickingThread) return
+                if (moving || flicking || dragging) root.pinThreadToEnd = root.threadAtEnd()
+              }
+              onMovementEnded: if (!root.stickingThread) root.pinThreadToEnd = root.threadAtEnd()
 
               header: Item {
                 width: threadView.width
-                height: selectedChatId > 0 && imsg && imsg.messages && imsg.messages.length > 0 ? Style.space(36) : 0
+                height: Models.hasId(selectedChatId) && imsg && imsg.messages && imsg.messages.length > 0 ? Style.space(36) : 0
                 Button {
                   anchors.horizontalCenter: parent.horizontalCenter
                   visible: parent.height > 0
@@ -489,13 +562,16 @@ Panel {
                   onClicked: {
                     if (!imsg || imsg.messages.length === 0) return
                     var oldest = imsg.messages[0]
-                    if (oldest && oldest.created_at) imsg.loadMessages(selectedChatId, oldest.created_at)
+                    if (oldest && oldest.created_at) {
+                      root.pinThreadToEnd = false
+                      imsg.loadMessages(selectedChatId, oldest.created_at)
+                    }
                   }
                 }
               }
 
               delegate: Item {
-                visible: Models.messageText(modelData).length > 0
+                visible: Models.messageText(modelData).length > 0 || Models.hasLocalPhoto(modelData)
                 width: ListView.view ? ListView.view.width : 0
                 height: visible ? bubble.height : 0
 
@@ -505,24 +581,49 @@ Panel {
                   anchors.left: fromMe ? undefined : parent.left
                   anchors.right: fromMe ? parent.right : undefined
                   width: Math.round(parent.width * 0.78)
-                  implicitHeight: bubbleText.implicitHeight + Style.space(16)
+                  implicitHeight: bubbleCol.implicitHeight + Style.space(16)
                   radius: Style.cornerRadius
                   color: fromMe ? root.selectedFill : root.normalFill
                   borderSpec: fromMe
                     ? Border.none()
                     : Border.controlSpec("normal", root.fg, Color.accent)
 
-                  Text {
-                    id: bubbleText
+                  Column {
+                    id: bubbleCol
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.top: parent.top
                     anchors.margins: Style.space(8)
-                    wrapMode: Text.Wrap
-                    text: Models.messageText(modelData)
-                    color: root.fg
-                    font.family: root.family
-                    font.pixelSize: Style.font.body
+                    spacing: Style.space(4)
+
+                    Image {
+                      visible: Models.hasLocalPhoto(modelData)
+                      width: parent.width
+                      height: visible ? Math.min(Style.space(180), implicitHeight > 0 ? implicitHeight : Style.space(120)) : 0
+                      fillMode: Image.PreserveAspectFit
+                      asynchronous: true
+                      source: visible ? ("file://" + String(modelData.local_path)) : ""
+                    }
+
+                    Text {
+                      id: bubbleText
+                      width: parent.width
+                      visible: Models.messageText(modelData).length > 0
+                      wrapMode: Text.Wrap
+                      text: Models.messageText(modelData)
+                      color: root.fg
+                      font.family: root.family
+                      font.pixelSize: Style.font.body
+                    }
+
+                    Text {
+                      width: parent.width
+                      visible: bubble.fromMe && (modelData.send_state === "sending" || modelData.send_state === "failed")
+                      text: modelData.send_state === "failed" ? "Not delivered" : "Sending"
+                      color: modelData.send_state === "failed" ? root.urgent : root.dim
+                      font.family: root.family
+                      font.pixelSize: Style.font.caption
+                    }
                   }
                 }
               }
@@ -531,13 +632,13 @@ Panel {
             Text {
               anchors.centerIn: threadView
               width: threadView.width * 0.8
-              visible: (!imsg || !imsg.messages || imsg.messages.length === 0) && root.setupReady
+              visible: (!imsg || !imsg.displayMessages || imsg.displayMessages.length === 0) && root.setupReady
               horizontalAlignment: Text.AlignHCenter
               wrapMode: Text.WordWrap
               color: root.dim
               font.family: root.family
               font.pixelSize: Style.font.body
-              text: selectedChatId > 0 ? "No messages in this chat yet." : "Select a conversation."
+              text: Models.hasId(selectedChatId) ? "No messages in this chat yet." : "Select a conversation."
             }
 
             Row {
@@ -547,15 +648,26 @@ Panel {
               anchors.bottom: parent.bottom
               spacing: Style.space(8)
 
+              Button {
+                id: photoBtn
+                text: "Photo"
+                foreground: root.fg
+                fontFamily: root.family
+                enabled: Models.hasId(selectedChatId) && imsg && !imsg.sending
+                onClicked: root.pickAttachment()
+              }
+
               TextField {
                 id: draftField
-                width: parent.width - sendBtn.width - parent.spacing
+                width: parent.width - sendBtn.width - photoBtn.width - parent.spacing * 2
                 foreground: root.fg
-                placeholderText: selectedChatId > 0 ? "Message" : "Select a conversation"
-                enabled: selectedChatId > 0 && imsg && !imsg.sending
+                placeholderText: Models.hasId(selectedChatId) ? "Message" : "Select a conversation"
+                enabled: Models.hasId(selectedChatId)
                 text: root.draftText
                 onTextChanged: root.draftText = text
                 onAccepted: root.sendDraft()
+                Keys.priority: Keys.BeforeItem
+                Keys.onPressed: root.composerKey(event)
               }
 
               Button {
@@ -563,7 +675,7 @@ Panel {
                 text: imsg && imsg.sending ? "…" : "Send"
                 foreground: root.fg
                 fontFamily: root.family
-                enabled: selectedChatId > 0 && imsg && !imsg.sending && root.draftText.trim().length > 0
+                enabled: Models.hasId(selectedChatId) && imsg && !imsg.sending && root.draftText.trim().length > 0
                 onClicked: root.sendDraft()
               }
             }
@@ -577,6 +689,38 @@ Panel {
     target: imsg
     function onChatsChanged() {
       if (root.opened) root.maybeSelectFirst()
+      if (!imsg || !Models.hasId(selectedChatId) || !imsg.chats) return
+      for (var i = 0; i < imsg.chats.length; i++) {
+        if (Models.sameId(imsg.chats[i].id, selectedChatId) && (imsg.chats[i].unread_count || 0) > 0) {
+          imsg.markRead(selectedChatId)
+          break
+        }
+      }
+    }
+    function onMessagesChanged() {
+      if (root.pinThreadToEnd) root.stickThread()
+    }
+    function onDisplayMessagesChanged() {
+      if (root.pinThreadToEnd) root.stickThread()
+    }
+    function onFailedDraftChanged() {
+      if (!imsg || !imsg.failedDraft || imsg.failedDraft.length === 0) return
+      if (root.draftText.trim().length > 0) return
+      root.draftText = imsg.failedDraft
+      if (draftField) draftField.text = imsg.failedDraft
+    }
+  }
+
+  FileDialog {
+    id: photoDialog
+    title: "Send photo"
+    fileMode: FileDialog.OpenFile
+    nameFilters: ["Images (*.jpg *.jpeg *.png *.gif *.webp *.heic *.heif *.bmp)"]
+    onAccepted: {
+      var u = String(selectedFile)
+      if (u.indexOf("file://") === 0) u = decodeURIComponent(u.substring(7))
+      if (imsg) imsg.sendAttachment(selectedChatId, u)
+      root.stickThread()
     }
   }
 }

@@ -50,9 +50,6 @@ function flag(value) {
 function friendlyError(err) {
   var s = String(err || "")
   if (s.length === 0) return ""
-  if (s === "database_unavailable" || s.indexOf("Database unavailable") !== -1 || s.indexOf("Full Disk Access") !== -1) {
-    return "Mac Messages database is locked"
-  }
   if (s === "sync_down" || s.indexOf("request failed") !== -1) {
     return "Local sync is down"
   }

@@ -8,13 +8,15 @@ Item {
   id: root
   property int unreadCount: 0
   property var chats: []
-  property int openChatId: 0
+  property var openChatId: ""
   property var messages: []
   property bool syncing: true
   property bool connected: false
   property bool bridgeConnected: false
   property bool databaseReady: false
   property bool sending: false
+  property var outgoing: []
+  property string failedDraft: ""
   property bool statusKnown: false
   property string lastError: ""
   property string sendError: ""
@@ -27,24 +29,41 @@ Item {
   })
   property bool settingsSaving: false
 
-  readonly property bool cacheReady: chats && chats.length > 0
-  readonly property string linkState: {
-    if (!connected && !cacheReady) return "waiting"
-    if (!connected) return "sync-down"
-    if (!statusKnown) return "checking"
-    if (bridgeConnected && databaseReady) return "live"
-    if (bridgeConnected) return "mac-locked"
-    return "mac-down"
+  readonly property var displayMessages: {
+    var hist = root.messages || []
+    var extras = []
+    var oid = String(root.openChatId || "")
+    for (var i = 0; i < root.outgoing.length; i++) {
+      var o = root.outgoing[i]
+      if (String(o.chat_id) !== oid) continue
+      if (o.send_state === "sent") continue
+      extras.push(o)
+    }
+    return extras.length === 0 ? hist : hist.concat(extras)
   }
+  readonly property bool cacheReady: chats && chats.length > 0
+  readonly property bool namesVisible: {
+    if (!chats) return false
+    for (var i = 0; i < chats.length; i++) {
+      var n = String(chats[i].contact_name || chats[i].display_name || chats[i].name || "")
+      if (/[A-Za-z]/.test(n)) return true
+    }
+    return false
+  }
+  readonly property string linkState: Store.linkState({
+    connected: root.connected,
+    cacheReady: root.cacheReady,
+    statusKnown: root.statusKnown,
+    bridgeConnected: root.bridgeConnected
+  })
   readonly property string contactsState: root.contacts || "unknown"
   readonly property var setupGuide: Store.setupGuide({
     connected: root.connected,
     cacheReady: root.cacheReady,
     statusKnown: root.statusKnown,
     bridgeConnected: root.bridgeConnected,
-    databaseReady: root.databaseReady,
-    lastError: root.lastError,
     contacts: root.contacts,
+    namesVisible: root.namesVisible,
     passwordSet: !!(root.settings && root.settings.password_set)
   })
   readonly property string requestScript: {
@@ -67,7 +86,7 @@ Item {
       applyPatch(Store.applySnapshot(frame.result))
       root.connected = true
       root.syncing = false
-      if (root.openChatId > 0) root.loadMessages(root.openChatId, null)
+      if (root.openChatId) root.loadMessages(root.openChatId, null)
       return
     }
     if (frame.type === "event") {
@@ -114,16 +133,45 @@ Item {
   }
 
   function refreshChats() {
-    startRequest(chatsProc, "chats.list", { limit: 50 })
+    startRequest(chatsProc, "chats.list", { limit: 80 })
   }
 
   function refreshStatus() {
     startRequest(statusProc, "status", {})
   }
 
+  function markRead(chatId) {
+    if (!chatId) return
+    var next = []
+    var total = 0
+    var dirty = false
+    for (var i = 0; i < root.chats.length; i++) {
+      var c = root.chats[i]
+      if (String(c.id) === String(chatId) && (c.unread_count || 0) > 0) {
+        var copy = {}
+        for (var k in c) copy[k] = c[k]
+        copy.unread_count = 0
+        next.push(copy)
+        dirty = true
+      } else {
+        next.push(c)
+        total += c.unread_count || 0
+      }
+    }
+    if (dirty) {
+      root.chats = next
+      root.unreadCount = total
+    }
+    if (markReadProc.running) {
+      markReadProc.pending = String(chatId)
+      return
+    }
+    startRequest(markReadProc, "chats.mark_read", { chat_id: chatId })
+  }
+
   function loadMessages(chatId, before) {
     if (!chatId) return
-    var params = { chat_id: chatId, limit: 50 }
+    var params = { chat_id: chatId, limit: 200 }
     if (before) params.before = before
     historyProc.beforeCursor = before || ""
     startRequest(historyProc, "messages.history", params)
@@ -134,12 +182,87 @@ Item {
     startRequest(contactsProc, "contacts.authorize", {})
   }
 
+  function addOutgoing(row) {
+    root.outgoing = root.outgoing.concat([row])
+  }
+
+  function finishOutgoing(id, ok) {
+    var next = []
+    for (var i = 0; i < root.outgoing.length; i++) {
+      var o = root.outgoing[i]
+      if (String(o.id) === String(id)) {
+        if (ok) continue
+        next.push({
+          id: o.id,
+          chat_id: o.chat_id,
+          text: o.text,
+          is_from_me: true,
+          send_state: "failed",
+          created_at: o.created_at,
+          local_path: o.local_path || "",
+          attachments: o.attachments || []
+        })
+      } else if (o.send_state !== "sent") {
+        next.push(o)
+      }
+    }
+    root.outgoing = next
+  }
+
   function sendMessage(chatId, text) {
     if (!chatId || !text || text.trim().length === 0 || requestScript === "" || sendProc.running) return
     sendError = ""
+    failedDraft = ""
+    var id = "pending-" + Date.now()
+    var body = text.trim()
+    addOutgoing({
+      id: id,
+      chat_id: chatId,
+      text: body,
+      is_from_me: true,
+      send_state: "sending",
+      created_at: new Date().toISOString(),
+      local_path: "",
+      attachments: []
+    })
     sendProc.chatId = chatId
-    if (startRequest(sendProc, "messages.send", { chat_id: chatId, text: text.trim() })) {
+    sendProc.outgoingId = id
+    sendProc.restoreText = body
+    if (startRequest(sendProc, "messages.send", { chat_id: chatId, text: body })) {
       sending = true
+    } else {
+      finishOutgoing(id, false)
+      failedDraft = body
+      sendError = ImsgClient.friendlyError("send failed")
+    }
+  }
+
+  function sendAttachment(chatId, path) {
+    if (!chatId || !path || String(path).length === 0 || requestScript === "" || sendProc.running) return
+    sendError = ""
+    failedDraft = ""
+    var id = "pending-" + Date.now()
+    var filePath = String(path)
+    var slash = filePath.lastIndexOf("/")
+    var name = slash >= 0 ? filePath.substring(slash + 1) : filePath
+    addOutgoing({
+      id: id,
+      chat_id: chatId,
+      text: "",
+      is_from_me: true,
+      send_state: "sending",
+      created_at: new Date().toISOString(),
+      local_path: filePath,
+      attachments: [{ name: name }]
+    })
+    sendProc.chatId = chatId
+    sendProc.outgoingId = id
+    sendProc.restoreText = ""
+    if (startRequest(sendProc, "messages.send_attachment", { chat_id: chatId, path: filePath })) {
+      sending = true
+    } else {
+      finishOutgoing(id, false)
+      sendError = ImsgClient.friendlyError("send failed")
     }
   }
 
@@ -219,6 +342,44 @@ Item {
         root.connected = false
       }
       chatsProc.stderrText = ""
+    }
+  }
+
+  Process {
+    id: markReadProc
+    running: false
+    command: []
+    property string payload: ""
+    property string pending: ""
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var res = ImsgClient.parseResponse(text)
+        if (res && res.ok && res.result && res.result.chat) {
+          var chat = res.result.chat
+          var next = []
+          var total = 0
+          for (var i = 0; i < root.chats.length; i++) {
+            if (String(root.chats[i].id) === String(chat.id)) next.push(chat)
+            else next.push(root.chats[i])
+            total += (String(root.chats[i].id) === String(chat.id) ? (chat.unread_count || 0) : (root.chats[i].unread_count || 0))
+          }
+          root.chats = next
+          root.unreadCount = total
+        }
+      }
+    }
+    onExited: function() {
+      if (markReadProc.pending.length > 0) {
+        var id = markReadProc.pending
+        markReadProc.pending = ""
+        root.markRead(id)
+      }
     }
   }
 
@@ -310,7 +471,9 @@ Item {
     running: false
     command: []
     property string payload: ""
-    property int chatId: 0
+    property var chatId: ""
+    property string outgoingId: ""
+    property string restoreText: ""
     property string stderrText: ""
     stdinEnabled: true
     onStarted: {
@@ -322,11 +485,18 @@ Item {
       onStreamFinished: {
         var res = ImsgClient.parseResponse(text)
         if (res && res.ok) {
+          root.finishOutgoing(sendProc.outgoingId, true)
           root.sendError = ""
           root.loadMessages(sendProc.chatId, null)
           root.refreshChats()
         } else if (res && res.error) {
+          root.finishOutgoing(sendProc.outgoingId, false)
+          root.failedDraft = sendProc.restoreText
           root.sendError = ImsgClient.friendlyError(res.error.message || "send failed")
+        } else {
+          root.finishOutgoing(sendProc.outgoingId, false)
+          root.failedDraft = sendProc.restoreText
+          root.sendError = ImsgClient.friendlyError("send failed")
         }
       }
     }
@@ -336,10 +506,14 @@ Item {
     }
     onExited: function(exitCode) {
       root.sending = false
-      if (exitCode !== 0) {
+      if (exitCode !== 0 && (!root.sendError || root.sendError.length === 0)) {
+        root.finishOutgoing(sendProc.outgoingId, false)
+        if (sendProc.restoreText.length > 0) root.failedDraft = sendProc.restoreText
         root.sendError = ImsgClient.friendlyError(sendProc.stderrText.trim() || ("send failed (code " + exitCode + ")"))
       }
       sendProc.stderrText = ""
+      sendProc.outgoingId = ""
+      sendProc.restoreText = ""
     }
   }
 

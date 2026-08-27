@@ -202,8 +202,8 @@ fn public_from_file(ctx: &StoreCtx, server: ServerUrl, file: &FileIn) -> PublicC
             .socket_path
             .clone()
             .unwrap_or_else(|| ctx.socket_path.clone()),
-        prefetch_chats: file.prefetch_chats.unwrap_or(20),
-        prefetch_messages: file.prefetch_messages.unwrap_or(50),
+        prefetch_chats: file.prefetch_chats.unwrap_or(40),
+        prefetch_messages: file.prefetch_messages.unwrap_or(100),
     }
 }
 

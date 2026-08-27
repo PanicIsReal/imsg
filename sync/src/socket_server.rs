@@ -233,13 +233,36 @@ async fn dispatch(
             Ok(view.to_status_fields())
         }
         "contacts.authorize" => {
-            if !link.uplink().is_up().await {
-                return Err(UplinkError::LinkDown.into());
+            let book = link.uplink().contact_book().await?;
+            let n = cache.write().await.apply_contact_book(&book).await?;
+            let chats = cache.read().await.list_chats(50).await?;
+            let _ = events.send(Envelope::Event {
+                topic: "sync.chats".into(),
+                payload: json!({"reason": "contacts", "chats": chats}),
+            });
+            let names_visible = n > 0
+                || chats.iter().any(|c| {
+                    c["contact_name"]
+                        .as_str()
+                        .is_some_and(|s| s.chars().any(|ch| ch.is_alphabetic()))
+                });
+            Ok(json!({
+                "outcome": if names_visible { "granted" } else { "unavailable" },
+                "names_visible": names_visible
+            }))
+        }
+        "chats.mark_read" => {
+            let chat_id = crate::domain::parse_json_id(&params["chat_id"]).context("chat_id required")?;
+            let chat = cache.write().await.mark_read(chat_id).await?;
+            if let Some(guid) = cache.read().await.guid_for_chat_id(chat_id).await? {
+                if let Ok(guid) = ChatGuid::parse(guid) {
+                    let _ = link.uplink().mark_read(&guid).await;
+                }
             }
-            Ok(json!({"outcome": "granted", "names_visible": true}))
+            Ok(json!({"chat": chat}))
         }
         "messages.send" => {
-            let chat_id = params["chat_id"].as_i64().context("chat_id required")?;
+            let chat_id = crate::domain::parse_json_id(&params["chat_id"]).context("chat_id required")?;
             let text = params["text"].as_str().context("text required")?;
             let guid = cache
                 .read()
@@ -254,16 +277,33 @@ async fn dispatch(
             let _ = events.send(live_event(applied));
             Ok(json!({"ok": true, "message": out}))
         }
+        "messages.send_attachment" => {
+            let chat_id = crate::domain::parse_json_id(&params["chat_id"]).context("chat_id required")?;
+            let path = params["path"].as_str().context("path required")?;
+            let guard = cache.read().await;
+            let guid = guard.guid_for_chat_id(chat_id).await?.context("unknown chat")?;
+            let identifier = guard.identifier_for_chat_id(chat_id).await?.unwrap_or_default();
+            drop(guard);
+            let guid = ChatGuid::parse(guid)?;
+            let msg = link
+                .uplink()
+                .send_attachment(&guid, &identifier, std::path::Path::new(path))
+                .await?;
+            let applied = cache.write().await.apply_domain_message(&msg).await?;
+            let out = applied.message.clone();
+            let _ = events.send(live_event(applied));
+            Ok(json!({"ok": true, "message": out}))
+        }
         "chats.list" => {
             let guard = cache.read().await;
-            let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+            let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(80);
             let chats = guard.list_chats(limit).await?;
             Ok(json!({"chats": chats}))
         }
         "messages.history" => {
             let guard = cache.read().await;
-            let chat_id = params["chat_id"].as_i64().context("chat_id required")?;
-            let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+            let chat_id = crate::domain::parse_json_id(&params["chat_id"]).context("chat_id required")?;
+            let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(200);
             let before = params.get("before").and_then(|v| v.as_str());
             let messages = guard.list_messages(chat_id, limit, before).await?;
             Ok(json!({"messages": messages}))

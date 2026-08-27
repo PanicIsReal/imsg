@@ -1,10 +1,23 @@
 .pragma library
 
+function sameId(a, b) {
+  return String(a || "") === String(b || "")
+}
+
+function hasId(id) {
+  var s = String(id || "")
+  return s.length > 0 && s !== "0"
+}
+
+function isPersonName(value) {
+  return /[A-Za-z]/.test(String(value || ""))
+}
+
 function chatTitle(chat) {
   if (!chat) return "Chat"
-  if (chat.contact_name && chat.contact_name.length > 0) return chat.contact_name
-  if (chat.display_name && chat.display_name.length > 0) return chat.display_name
-  if (chat.name && chat.name.length > 0) return chat.name
+  if (isPersonName(chat.contact_name)) return chat.contact_name
+  if (isPersonName(chat.display_name)) return chat.display_name
+  if (isPersonName(chat.name)) return chat.name
   if (chat.is_group && chat.participants && chat.participants.length > 0) {
     var names = []
     for (var i = 0; i < Math.min(chat.participants.length, 3); i++) {
@@ -49,10 +62,24 @@ function formatTime(iso) {
   return Qt.formatDate(d, "MMM d, yyyy")
 }
 
+function hasLocalPhoto(msg) {
+  return !!(msg && msg.local_path && String(msg.local_path).length > 0)
+}
+
 function messageText(msg) {
   var text = String((msg && msg.text) || "").replace(/\uFFFC/g, "").trim()
   if (text.length > 0) return text
-  if (msg && msg.attachments && msg.attachments.length > 0) return "Attachment"
+  if (hasLocalPhoto(msg)) {
+    var path = String(msg.local_path)
+    var slash = path.lastIndexOf("/")
+    var name = slash >= 0 ? path.substring(slash + 1) : path
+    return name.length > 0 ? name : "Photo"
+  }
+  if (msg && msg.attachments && msg.attachments.length > 0) {
+    var n = msg.attachments[0] && msg.attachments[0].name
+    if (n && String(n).length > 0) return String(n)
+    return "Attachment"
+  }
   return ""
 }
 

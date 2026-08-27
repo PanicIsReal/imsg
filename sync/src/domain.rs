@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -7,6 +7,18 @@ pub struct ChatGuid(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MessageGuid(String);
+
+pub fn attachment_form_guid(chat_guid: &ChatGuid, identifier: &str) -> String {
+    if chat_guid.is_group() {
+        return chat_guid.as_str().to_string();
+    }
+    let ident = identifier.trim();
+    if ident.is_empty() {
+        chat_guid.as_str().to_string()
+    } else {
+        ident.to_string()
+    }
+}
 
 impl ChatGuid {
     pub fn parse(raw: impl AsRef<str>) -> Result<Self> {
@@ -87,7 +99,7 @@ impl Chat {
         let display_name = value["displayName"]
             .as_str()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| is_person_name(s))
             .map(str::to_string);
         let participants = parse_handles(&value["participants"]);
         let last_message_at = value
@@ -106,11 +118,55 @@ impl Chat {
         })
     }
 
+    pub fn stub(
+        guid: ChatGuid,
+        handle: Option<Handle>,
+        last_message_at: Option<String>,
+        unread_count: u32,
+    ) -> Self {
+        let identifier = handle
+            .as_ref()
+            .map(|h| h.address.clone())
+            .unwrap_or_else(|| guid.as_str().to_string());
+        let display_name = handle.as_ref().and_then(|h| h.name.clone());
+        let is_group = guid.is_group();
+        Self {
+            guid,
+            identifier,
+            display_name,
+            participants: handle.into_iter().collect(),
+            last_message_at,
+            unread_count,
+            is_group,
+        }
+    }
+
+    pub fn stub_from_message(msg: &Message) -> Self {
+        Self::stub(
+            msg.chat.clone(),
+            msg.sender.clone(),
+            Some(msg.created_at.clone()).filter(|s| !s.is_empty()),
+            if msg.is_from_me { 0 } else { 1 },
+        )
+    }
+
+    pub fn apply_contacts(&mut self, book: &ContactBook) {
+        for handle in &mut self.participants {
+            apply_name(&mut handle.name, book.lookup(&handle.address));
+        }
+        apply_name(&mut self.display_name, book.lookup(&self.identifier));
+    }
+
     pub fn to_cache_json(&self, id: i64) -> Value {
         let name = self
             .display_name
             .clone()
-            .or_else(|| self.participants.iter().find_map(|h| h.name.clone()))
+            .filter(|n| is_person_name(n))
+            .or_else(|| {
+                self.participants
+                    .iter()
+                    .find_map(|h| h.name.clone().filter(|n| is_person_name(n)))
+            })
             .unwrap_or_else(|| self.identifier.clone());
         let participants: Vec<String> = self
             .participants
@@ -118,7 +174,7 @@ impl Chat {
             .map(|h| h.address.clone())
             .collect();
         json!({
-            "id": id,
+            "id": json_id(id),
             "guid": self.guid.as_str(),
             "name": name,
             "contact_name": name,
@@ -133,6 +189,12 @@ impl Chat {
 }
 
 impl Message {
+    pub fn apply_contacts(&mut self, book: &ContactBook) {
+        if let Some(handle) = &mut self.sender {
+            apply_name(&mut handle.name, book.lookup(&handle.address));
+        }
+    }
+
     pub fn from_bb(value: &Value, fallback_chat: Option<&ChatGuid>) -> Result<Self> {
         let guid = MessageGuid::parse(value["guid"].as_str().unwrap_or(""))?;
         let chat = chat_guid_from_message(value, fallback_chat)?;
@@ -179,8 +241,8 @@ impl Message {
 
     pub fn to_cache_json(&self, id: i64, chat_id: i64) -> Value {
         json!({
-            "id": id,
-            "chat_id": chat_id,
+            "id": json_id(id),
+            "chat_id": json_id(chat_id),
             "guid": self.guid.as_str(),
             "text": self.text,
             "created_at": self.created_at,
@@ -272,12 +334,192 @@ fn parse_handle(value: Option<&Value>) -> Option<Handle> {
     Some(Handle {
         address,
         service: v["service"].as_str().map(str::to_string),
-        name: v["uncanonicalizedId"]
+        name: v["displayName"]
             .as_str()
             .or(v["name"].as_str())
-            .map(str::to_string)
-            .filter(|s| !s.is_empty()),
+            .map(str::trim)
+            .filter(|s| is_person_name(s))
+            .map(str::to_string),
     })
+}
+
+pub fn json_id(id: i64) -> String {
+    id.to_string()
+}
+
+pub fn parse_json_id(value: &Value) -> Result<i64> {
+    if let Some(n) = value.as_i64() {
+        return Ok(n);
+    }
+    if let Some(n) = value.as_u64() {
+        return Ok(i64::try_from(n).unwrap_or(0));
+    }
+    if let Some(s) = value.as_str() {
+        return s.parse().context("id");
+    }
+    anyhow::bail!("id required")
+}
+
+pub fn stringify_row_ids(mut value: Value) -> Value {
+    if let Some(obj) = value.as_object_mut() {
+        for key in ["id", "chat_id"] {
+            if let Some(val) = obj.get(key) {
+                if let Ok(n) = parse_json_id(val) {
+                    obj.insert(key.to_string(), Value::String(json_id(n)));
+                }
+            }
+        }
+    }
+    value
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ContactBook {
+    names: std::collections::HashMap<String, String>,
+}
+
+impl ContactBook {
+    pub fn from_bb(value: &Value) -> Self {
+        let mut book = Self::default();
+        let arr = match value {
+            Value::Array(arr) => arr.clone(),
+            Value::Object(map) => map
+                .get("contacts")
+                .or_else(|| map.get("data"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+            _ => return book,
+        };
+        for contact in arr {
+            let name = contact_display_name(&contact);
+            if !is_person_name(&name) {
+                continue;
+            }
+            let phones = contact["phoneNumbers"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let emails = contact["emails"].as_array().cloned().unwrap_or_default();
+            for entry in phones.into_iter().chain(emails) {
+                let Some(addr) = contact_address(&entry) else { continue };
+                book.record(&addr, &name);
+            }
+        }
+        book
+    }
+
+    pub fn lookup(&self, address: &str) -> Option<&str> {
+        address_keys(address)
+            .into_iter()
+            .find_map(|k| self.names.get(&k).map(String::as_str))
+    }
+
+    pub fn record(&mut self, address: &str, name: &str) {
+        if !is_person_name(name) || address.trim().is_empty() {
+            return;
+        }
+        for key in address_keys(address) {
+            self.names.entry(key).or_insert_with(|| name.to_string());
+        }
+    }
+
+    pub fn seed_from_chat(&mut self, chat: &Chat) {
+        if chat.is_group {
+            for handle in &chat.participants {
+                if let Some(name) = handle.name.as_deref() {
+                    self.record(&handle.address, name);
+                }
+            }
+            return;
+        }
+        if let Some(name) = chat.display_name.as_deref() {
+            self.record(&chat.identifier, name);
+            for handle in &chat.participants {
+                self.record(&handle.address, name);
+            }
+        }
+        for handle in &chat.participants {
+            if let Some(name) = handle.name.as_deref() {
+                self.record(&handle.address, name);
+                self.record(&chat.identifier, name);
+            }
+        }
+    }
+
+    pub fn seed_from_cache_chat(&mut self, chat: &Value) {
+        if chat["is_group"].as_bool().unwrap_or(false) {
+            return;
+        }
+        let ident = chat["identifier"].as_str().unwrap_or("");
+        for key in ["contact_name", "display_name", "name"] {
+            if let Some(name) = chat[key].as_str().filter(|s| is_person_name(s)) {
+                self.record(ident, name);
+                break;
+            }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+}
+
+pub fn is_person_name(s: &str) -> bool {
+    s.chars().any(|c| c.is_alphabetic())
+}
+
+fn apply_name(slot: &mut Option<String>, from_book: Option<&str>) {
+    if slot.as_deref().is_some_and(is_person_name) {
+        return;
+    }
+    if let Some(name) = from_book.filter(|n| is_person_name(n)) {
+        *slot = Some(name.to_string());
+        return;
+    }
+    if slot.as_deref().is_some_and(|n| !is_person_name(n)) {
+        *slot = None;
+    }
+}
+
+fn contact_address(entry: &Value) -> Option<String> {
+    if let Some(s) = entry.as_str() {
+        return Some(s.to_string());
+    }
+    for key in ["address", "phoneNumber", "number", "unformatted", "digits", "email"] {
+        if let Some(s) = entry.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+fn contact_display_name(contact: &Value) -> String {
+    contact["displayName"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let first = contact["firstName"].as_str().unwrap_or("").trim();
+            let last = contact["lastName"].as_str().unwrap_or("").trim();
+            format!("{first} {last}").trim().to_string()
+        })
+}
+
+fn address_keys(raw: &str) -> Vec<String> {
+    let raw = raw.trim();
+    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+    let mut keys = vec![raw.to_lowercase(), digits.clone()];
+    if digits.len() == 11 && digits.starts_with('1') {
+        keys.push(digits[1..].to_string());
+        keys.push(format!("+{digits}"));
+        keys.push(format!("+{}", &digits[1..]));
+    } else if digits.len() == 10 {
+        keys.push(format!("1{digits}"));
+        keys.push(format!("+1{digits}"));
+    }
+    keys
 }
 
 #[cfg(test)]
@@ -291,6 +533,18 @@ mod tests {
         let group = ChatGuid::parse("iMessage;+;chat123").unwrap();
         assert!(group.is_group());
         assert!(ChatGuid::parse("").is_err());
+        assert_eq!(
+            attachment_form_guid(&dm, "+15551234567"),
+            "+15551234567"
+        );
+        assert_eq!(
+            attachment_form_guid(&ChatGuid::parse("any;-;+17803700650").unwrap(), "+17803700650"),
+            "+17803700650"
+        );
+        assert_eq!(
+            attachment_form_guid(&group, "chat123"),
+            "iMessage;+;chat123"
+        );
     }
 
     #[test]
@@ -300,6 +554,105 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, 0);
         assert_ne!(stable_id("other"), a);
+    }
+
+    #[test]
+    fn hashed_ids_serialize_as_strings() {
+        let raw = json!({
+            "guid": "iMessage;-;+15551234567",
+            "chatIdentifier": "+15551234567",
+            "participants": [{"address": "+15551234567"}]
+        });
+        let chat = Chat::from_bb(&raw).unwrap();
+        let doc = chat.to_cache_json(8_188_273_931_022_499_394);
+        assert!(doc["id"].is_string());
+        assert_eq!(doc["id"], "8188273931022499394");
+        assert_eq!(parse_json_id(&doc["id"]).unwrap(), 8_188_273_931_022_499_394);
+    }
+
+    #[test]
+    fn contact_book_matches_plus_one_and_bare_digits() {
+        let book = ContactBook::from_bb(&json!([{
+            "displayName": "Pat Limp",
+            "firstName": "Pat",
+            "lastName": "Limp",
+            "phoneNumbers": [{"address": "14035420270"}],
+            "emails": []
+        }]));
+        assert_eq!(book.lookup("+14035420270"), Some("Pat Limp"));
+        assert_eq!(book.lookup("4035420270"), Some("Pat Limp"));
+        let mut chat = Chat::from_bb(&json!({
+            "guid": "iMessage;-;+14035420270",
+            "chatIdentifier": "+14035420270",
+            "participants": [{"address": "+14035420270", "service": "iMessage"}]
+        }))
+        .unwrap();
+        chat.apply_contacts(&book);
+        assert_eq!(chat.to_cache_json(1)["contact_name"], "Pat Limp");
+    }
+
+    #[test]
+    fn handle_uncanonicalized_id_is_not_a_name() {
+        let msg = Message::from_bb(
+            &json!({
+                "guid": "MSG-DIGITS",
+                "text": "hi",
+                "isFromMe": false,
+                "dateCreated": 1_700_000_000_000i64,
+                "handle": {
+                    "address": "+17807929927",
+                    "uncanonicalizedId": "7807929927",
+                    "name": "7807929927"
+                },
+                "chats": [{"guid": "any;-;+17807929927"}]
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(msg.sender.as_ref().unwrap().address, "+17807929927");
+        assert_eq!(msg.sender.as_ref().unwrap().name, None);
+        assert!(!is_person_name("7807929927"));
+        assert!(!is_person_name("+17807929927"));
+        assert!(is_person_name("Dawson Coon"));
+        assert!(is_person_name("Wife 💕"));
+    }
+
+    #[test]
+    fn seed_from_chat_display_name_fills_live_handle() {
+        let chat = Chat::from_bb(&json!({
+            "guid": "any;-;+17807929927",
+            "chatIdentifier": "+17807929927",
+            "displayName": "Dawson Coon",
+            "participants": [{"address": "+17807929927"}]
+        }))
+        .unwrap();
+        let mut book = ContactBook::default();
+        book.seed_from_chat(&chat);
+        let mut msg = Message::from_bb(
+            &json!({
+                "guid": "MSG-LIVE",
+                "text": "hi",
+                "isFromMe": false,
+                "handle": {"address": "+17807929927", "uncanonicalizedId": "7807929927"},
+                "chats": [{"guid": "any;-;+17807929927"}]
+            }),
+            None,
+        )
+        .unwrap();
+        msg.apply_contacts(&book);
+        assert_eq!(msg.sender.as_ref().unwrap().name.as_deref(), Some("Dawson Coon"));
+        assert_eq!(msg.to_cache_json(1, 1)["sender_name"], "Dawson Coon");
+
+        let mut group_book = ContactBook::default();
+        let group = Chat::from_bb(&json!({
+            "guid": "any;+;abc",
+            "chatIdentifier": "abc",
+            "displayName": "Dream Team 2.0",
+            "participants": [{"address": "+17808419350"}]
+        }))
+        .unwrap();
+        group_book.seed_from_chat(&group);
+        assert_eq!(group_book.lookup("+17808419350"), None);
     }
 
     #[test]
@@ -317,7 +670,7 @@ mod tests {
         assert_eq!(chat.identifier, "+15551234567");
         assert_eq!(chat.unread_count, 2);
         let doc = chat.to_cache_json(42);
-        assert_eq!(doc["id"], 42);
+        assert_eq!(doc["id"], "42");
         assert_eq!(doc["contact_name"], "Ada");
         assert!(doc.get("chatIdentifier").is_none());
         assert!(doc.get("dateCreated").is_none());
@@ -337,7 +690,8 @@ mod tests {
         let msg = Message::from_bb(&raw, None).unwrap();
         assert_eq!(msg.chat.as_str(), "iMessage;-;+15551234567");
         let doc = msg.to_cache_json(9, 42);
-        assert_eq!(doc["chat_id"], 42);
+        assert_eq!(doc["chat_id"], "42");
+        assert_eq!(doc["id"], "9");
         assert_eq!(doc["sender"], "+15551234567");
         assert_eq!(doc["sender_name"], "Ada");
         assert_eq!(doc["is_from_me"], false);

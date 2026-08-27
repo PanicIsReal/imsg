@@ -1,11 +1,14 @@
-use crate::domain::{Chat, ChatGuid, Message, MessageGuid};
+use crate::domain::{
+    attachment_form_guid, AttachmentMeta, Chat, ChatGuid, ContactBook, Message, MessageGuid,
+};
 use crate::link::Credentials;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -35,6 +38,7 @@ impl BbError {
 pub struct BlueBubbles {
     http: reqwest::Client,
     creds: Credentials,
+    contacts: RwLock<ContactBook>,
 }
 
 pub struct Subscription {
@@ -48,7 +52,11 @@ impl BlueBubbles {
             .timeout(Duration::from_secs(15))
             .build()
             .context("http client")?;
-        Ok(Self { http, creds })
+        Ok(Self {
+            http,
+            creds,
+            contacts: RwLock::new(ContactBook::default()),
+        })
     }
 
     pub async fn connect(creds: Credentials) -> Result<Arc<Self>> {
@@ -85,6 +93,22 @@ impl BlueBubbles {
             .map_err(|e| BbError::Upstream(e.to_string()))
     }
 
+    pub async fn query_contacts(&self) -> Result<ContactBook, BbError> {
+        let body = self.get("api/v1/contact").await?;
+        let data = envelope_data(&body)?;
+        let book = ContactBook::from_bb(&data);
+        *self.contacts.write().await = book.clone();
+        Ok(book)
+    }
+
+    pub async fn contact_book(&self) -> ContactBook {
+        self.contacts.read().await.clone()
+    }
+
+    pub async fn replace_contacts(&self, book: ContactBook) {
+        *self.contacts.write().await = book;
+    }
+
     pub async fn chat_messages(&self, chat: &ChatGuid, limit: u32) -> Result<Vec<Message>, BbError> {
         let encoded = path_encode(chat.as_str());
         let body = self
@@ -100,19 +124,79 @@ impl BlueBubbles {
             .map_err(|e| BbError::Upstream(e.to_string()))
     }
 
+    pub async fn mark_read(&self, chat: &ChatGuid) -> Result<(), BbError> {
+        let encoded = path_encode(chat.as_str());
+        match self
+            .post(&format!("api/v1/chat/{encoded}/read"), json!({}))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(BbError::Upstream(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     pub async fn send_text(&self, chat: &ChatGuid, text: &str) -> Result<Message, BbError> {
+        let temp = format!("temp-{}", Uuid::new_v4());
         let body = self
             .post(
                 "api/v1/message/text",
                 json!({
                     "chatGuid": chat.as_str(),
-                    "tempGuid": format!("temp-{}", Uuid::new_v4()),
+                    "tempGuid": temp,
                     "message": text,
                 }),
             )
             .await?;
         let data = envelope_data(&body)?;
-        Message::from_bb(&data, Some(chat)).map_err(|e| BbError::Upstream(e.to_string()))
+        message_from_send_response(data, chat, text, &temp, None)
+    }
+
+    pub async fn send_attachment(
+        &self,
+        chat: &ChatGuid,
+        identifier: &str,
+        path: &Path,
+    ) -> Result<Message, BbError> {
+        let path = readable_image_path(path)?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("photo.jpg")
+            .to_string();
+        let bytes = std::fs::read(&path).map_err(|e| BbError::Upstream(e.to_string()))?;
+        let temp = format!("temp-{}", Uuid::new_v4());
+        let form_guid = attachment_form_guid(chat, identifier);
+        let mut url = self.authed("api/v1/message/attachment")?;
+        url.query_pairs_mut().append_pair("chatGuid", chat.as_str());
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(name.clone())
+            .mime_str("application/octet-stream")
+            .map_err(|e| BbError::Upstream(e.to_string()))?;
+        let form = reqwest::multipart::Form::new()
+            .text("chatGuid", form_guid)
+            .text("tempGuid", temp.clone())
+            .text("name", name.clone())
+            .part("attachment", part);
+        let res = self
+            .http
+            .post(url)
+            .timeout(Duration::from_secs(120))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(transport)?;
+        let body = read_json(res).await?;
+        let data = envelope_data(&body)?;
+        let mut msg = message_from_send_response(data, chat, "", &temp, Some(&name))?;
+        if msg.attachments.is_empty() {
+            msg.attachments.push(AttachmentMeta {
+                guid: temp,
+                mime: None,
+                name: Some(name),
+            });
+        }
+        Ok(msg)
     }
 
     pub async fn recent_messages(&self, limit: u32) -> Result<Vec<Message>, BbError> {
@@ -206,6 +290,69 @@ fn path_encode(s: &str) -> String {
     out
 }
 
+pub fn readable_image_path(path: &Path) -> Result<PathBuf, BbError> {
+    let path = path.canonicalize().map_err(|e| BbError::Upstream(e.to_string()))?;
+    if !path.is_file() {
+        return Err(BbError::Upstream("not a file".into()));
+    }
+    let meta = path.metadata().map_err(|e| BbError::Upstream(e.to_string()))?;
+    if meta.len() > 25 * 1024 * 1024 {
+        return Err(BbError::Upstream("image larger than 25 MB".into()));
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "bmp" => Ok(path),
+        _ => Err(BbError::Upstream("not an image".into())),
+    }
+}
+
+fn message_from_send_response(
+    data: Value,
+    chat: &ChatGuid,
+    text: &str,
+    temp: &str,
+    attachment: Option<&str>,
+) -> Result<Message, BbError> {
+    let payload = if data
+        .get("guid")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+    {
+        data
+    } else if let Some(inner) = data.get("message").cloned() {
+        inner
+    } else if let Some(first) = data.as_array().and_then(|a| a.first()).cloned() {
+        first
+    } else {
+        data
+    };
+    if let Ok(msg) = Message::from_bb(&payload, Some(chat)) {
+        return Ok(msg);
+    }
+    let attachments = attachment
+        .map(|name| {
+            vec![AttachmentMeta {
+                guid: temp.to_string(),
+                mime: None,
+                name: Some(name.to_string()),
+            }]
+        })
+        .unwrap_or_default();
+    Ok(Message {
+        guid: MessageGuid::parse(temp).map_err(|e| BbError::Upstream(e.to_string()))?,
+        chat: chat.clone(),
+        text: text.to_string(),
+        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        is_from_me: true,
+        sender: None,
+        attachments,
+    })
+}
+
 fn envelope_data(body: &Value) -> Result<Value, BbError> {
     if let Some(err) = body.get("error") {
         if !err.is_null() {
@@ -253,7 +400,6 @@ async fn poll_loop(client: Arc<BlueBubbles>, tx: mpsc::Sender<Message>) -> Resul
     }
 }
 
-#[allow(dead_code)]
 pub fn dedupe_guid(seen: &mut VecDeque<MessageGuid>, guid: &MessageGuid) -> bool {
     if seen.iter().any(|g| g == guid) {
         return false;
@@ -283,5 +429,54 @@ mod tests {
         let g = MessageGuid::parse("A").unwrap();
         assert!(dedupe_guid(&mut seen, &g));
         assert!(!dedupe_guid(&mut seen, &g));
+    }
+
+    #[test]
+    fn send_response_uses_message_body_when_guid_present() {
+        let chat = ChatGuid::parse("iMessage;-;+15551212").unwrap();
+        let data = json!({
+            "guid": "MSG-1",
+            "text": "hi",
+            "isFromMe": true,
+            "dateCreated": 1_700_000_000_000i64,
+        });
+        let msg = message_from_send_response(data, &chat, "hi", "temp-x", None).unwrap();
+        assert_eq!(msg.guid.as_str(), "MSG-1");
+        assert_eq!(msg.text, "hi");
+        assert!(msg.is_from_me);
+        assert_eq!(msg.chat.as_str(), "iMessage;-;+15551212");
+    }
+
+    #[test]
+    fn send_response_unwraps_nested_message_and_stubs_missing_guid() {
+        let chat = ChatGuid::parse("iMessage;-;+15551212").unwrap();
+        let nested = json!({"message": {"text": "hi", "isFromMe": true}});
+        let msg = message_from_send_response(nested, &chat, "hi", "temp-nested", None).unwrap();
+        assert_eq!(msg.guid.as_str(), "temp-nested");
+        assert_eq!(msg.text, "hi");
+        assert!(msg.is_from_me);
+
+        let empty = json!({"status": "queued"});
+        let stub = message_from_send_response(empty, &chat, "queued", "temp-empty", None).unwrap();
+        assert_eq!(stub.guid.as_str(), "temp-empty");
+        assert_eq!(stub.text, "queued");
+    }
+
+    #[test]
+    fn send_envelope_error_is_not_a_successful_stub() {
+        let err = json!({"status": 400, "message": "not delivered", "error": {"error": "not delivered"}});
+        assert!(envelope_data(&err).is_err());
+    }
+
+    #[test]
+    fn readable_image_path_rejects_missing_and_non_image() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(readable_image_path(&dir.path().join("nope.png")).is_err());
+        let txt = dir.path().join("note.txt");
+        std::fs::write(&txt, b"hi").unwrap();
+        assert!(readable_image_path(&txt).is_err());
+        let png = dir.path().join("pic.png");
+        std::fs::write(&png, b"not-really-png").unwrap();
+        assert_eq!(readable_image_path(&png).unwrap(), png.canonicalize().unwrap());
     }
 }

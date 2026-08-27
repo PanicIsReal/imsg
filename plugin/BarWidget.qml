@@ -28,8 +28,8 @@ BarWidget {
   }
 
   function openChat(chatId) {
-    var id = Number(chatId)
-    if (!panelLoader.item || !(id > 0)) {
+    var id = String(chatId || "")
+    if (!panelLoader.item || id.length === 0 || id === "0") {
       root.open()
       return
     }
@@ -101,7 +101,7 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    dimmed: root.linkState === "mac-down" || root.linkState === "sync-down" || root.linkState === "mac-locked"
+    dimmed: root.linkState === "mac-down" || root.linkState === "sync-down"
     text: imsg && imsg.unreadCount > 0 ? "󰍩 " + imsg.unreadCount : "󰍩"
     tooltipText: {
       var guide = imsg && imsg.setupGuide
