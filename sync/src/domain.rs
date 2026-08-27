@@ -148,6 +148,16 @@ impl Chat {
 }
 
 impl Message {
+    pub fn apply_contacts(&mut self, book: &ContactBook) {
+        if let Some(handle) = &mut self.sender {
+            if handle.name.is_none() {
+                if let Some(name) = book.lookup(&handle.address) {
+                    handle.name = Some(name.to_string());
+                }
+            }
+        }
+    }
+
     pub fn from_bb(value: &Value, fallback_chat: Option<&ChatGuid>) -> Result<Self> {
         let guid = MessageGuid::parse(value["guid"].as_str().unwrap_or(""))?;
         let chat = chat_guid_from_message(value, fallback_chat)?;

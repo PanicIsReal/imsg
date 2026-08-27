@@ -478,7 +478,7 @@ fn merge_message(existing: Option<Value>, incoming: &Value) -> Value {
         if v.is_null() {
             continue;
         }
-        if k == "chat_id" && v.as_i64().unwrap_or(0) == 0 {
+        if k == "chat_id" && crate::domain::parse_json_id(v).unwrap_or(0) == 0 {
             continue;
         }
         if k == "created_at" && v.as_str().is_none_or(|s| s.is_empty()) {
@@ -512,6 +512,41 @@ mod tests {
         cache.upsert_chat(&chat).await.unwrap();
         let chats = cache.list_chats(10).await.unwrap();
         assert_eq!(chats.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_live_message_string_chat_id_stays_on_that_chat() {
+        let dir = tempdir().unwrap();
+        let cache = MessageCache::open(&dir.path().join("cache.db"))
+            .await
+            .unwrap();
+        cache
+            .upsert_chat(&serde_json::json!({
+                "id": "8188273931022499394",
+                "name": "Pat",
+                "identifier": "+14035420270",
+                "last_message_at": "2026-01-01T00:00:00Z",
+                "unread_count": 0
+            }))
+            .await
+            .unwrap();
+        let applied = cache
+            .apply_live_message(&serde_json::json!({
+                "id": "9",
+                "chat_id": "8188273931022499394",
+                "text": "hello",
+                "created_at": "2026-01-02T12:00:00Z",
+                "is_from_me": false
+            }))
+            .await
+            .unwrap();
+        assert_eq!(applied.message["chat_id"], "8188273931022499394");
+        let messages = cache
+            .list_messages(8_188_273_931_022_499_394, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["chat_id"], "8188273931022499394");
     }
 
     #[tokio::test]

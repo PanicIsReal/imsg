@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -35,6 +35,7 @@ impl BbError {
 pub struct BlueBubbles {
     http: reqwest::Client,
     creds: Credentials,
+    contacts: RwLock<ContactBook>,
 }
 
 pub struct Subscription {
@@ -48,7 +49,11 @@ impl BlueBubbles {
             .timeout(Duration::from_secs(15))
             .build()
             .context("http client")?;
-        Ok(Self { http, creds })
+        Ok(Self {
+            http,
+            creds,
+            contacts: RwLock::new(ContactBook::default()),
+        })
     }
 
     pub async fn connect(creds: Credentials) -> Result<Arc<Self>> {
@@ -88,7 +93,13 @@ impl BlueBubbles {
     pub async fn query_contacts(&self) -> Result<ContactBook, BbError> {
         let body = self.get("api/v1/contact").await?;
         let data = envelope_data(&body)?;
-        Ok(ContactBook::from_bb(&data))
+        let book = ContactBook::from_bb(&data);
+        *self.contacts.write().await = book.clone();
+        Ok(book)
+    }
+
+    pub async fn contact_book(&self) -> ContactBook {
+        self.contacts.read().await.clone()
     }
 
     pub async fn chat_messages(&self, chat: &ChatGuid, limit: u32) -> Result<Vec<Message>, BbError> {

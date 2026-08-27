@@ -53,7 +53,7 @@ function applyMessage(state, payload) {
   }
   if (payload.is_new && msg && msg.is_from_me !== true && String(msg.chat_id) !== String(state.openChatId)) {
     patch.notify = {
-      sender: msg.sender_name || msg.sender || "iMessage",
+      sender: msg.sender_name || (payload.chat && payload.chat.contact_name) || msg.sender || "iMessage",
       preview: msg.text || "",
       chatId: msg.chat_id
     }
@@ -65,7 +65,7 @@ function upsertChat(chats, chat) {
   var out = []
   var found = false
   for (var i = 0; i < chats.length; i++) {
-    if (chats[i].id === chat.id) {
+    if (String(chats[i].id) === String(chat.id)) {
       out.push(chat)
       found = true
     } else {
@@ -84,7 +84,7 @@ function upsertChat(chats, chat) {
 
 function appendMessage(messages, msg) {
   for (var i = 0; i < messages.length; i++) {
-    if (messages[i].id === msg.id) {
+    if (String(messages[i].id) === String(msg.id)) {
       var copy = messages.slice()
       copy[i] = msg
       return copy

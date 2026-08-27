@@ -280,12 +280,13 @@ async fn reload_chats(
 }
 
 async fn apply_live(
-    msg: Message,
+    mut msg: Message,
     bb: &BlueBubbles,
     creds: &Credentials,
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
 ) -> Result<()> {
+    msg.apply_contacts(&bb.contact_book().await);
     let applied = {
         let guard = cache.write().await;
         guard.apply_domain_message(&msg).await?
