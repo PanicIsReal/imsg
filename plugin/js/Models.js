@@ -58,10 +58,24 @@ function formatTime(iso) {
   return Qt.formatDate(d, "MMM d, yyyy")
 }
 
+function hasLocalPhoto(msg) {
+  return !!(msg && msg.local_path && String(msg.local_path).length > 0)
+}
+
 function messageText(msg) {
   var text = String((msg && msg.text) || "").replace(/\uFFFC/g, "").trim()
   if (text.length > 0) return text
-  if (msg && msg.attachments && msg.attachments.length > 0) return "Attachment"
+  if (hasLocalPhoto(msg)) {
+    var path = String(msg.local_path)
+    var slash = path.lastIndexOf("/")
+    var name = slash >= 0 ? path.substring(slash + 1) : path
+    return name.length > 0 ? name : "Photo"
+  }
+  if (msg && msg.attachments && msg.attachments.length > 0) {
+    var n = msg.attachments[0] && msg.attachments[0].name
+    if (n && String(n).length > 0) return String(n)
+    return "Attachment"
+  }
   return ""
 }
 

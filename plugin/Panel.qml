@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import Quickshell
 import qs.Commons
 import qs.Ui
@@ -88,7 +89,6 @@ Panel {
       imsg.refreshStatus()
       if (Models.hasId(selectedChatId)) openChat(selectedChatId)
       else maybeSelectFirst()
-      root.focusComposer()
     }
   }
 
@@ -117,18 +117,31 @@ Panel {
       imsg.loadMessages(selectedChatId, null)
     }
     root.stickThread()
-    root.focusComposer()
   }
 
   function sendDraft() {
     if (!imsg || !Models.hasId(selectedChatId) || draftText.trim().length === 0 || imsg.sending) return
-    imsg.sendMessage(selectedChatId, draftText)
+    var text = draftText
+    root.draftText = ""
+    if (draftField) draftField.text = ""
+    imsg.sendMessage(selectedChatId, text)
+    root.stickThread()
+    root.focusComposer()
+  }
+
+  function pickAttachment() {
+    if (!Models.hasId(selectedChatId) || (imsg && imsg.sending)) return
+    photoDialog.open()
   }
 
   function focusComposer() {
     if (root.settingsVisible) return
     if (Models.hasId(selectedChatId) && draftField.enabled) draftField.forceActiveFocus()
     else keyCatcher.forceActiveFocus()
+  }
+
+  function blurComposer() {
+    keyCatcher.forceActiveFocus()
   }
 
   function stickThread() {
@@ -142,23 +155,12 @@ Panel {
 
   function composerKey(event) {
     if (event.key === Qt.Key_Escape) {
-      root.close()
+      root.blurComposer()
       event.accepted = true
       return
     }
     if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
       root.switchPanel((event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab ? -1 : 1)
-      event.accepted = true
-      return
-    }
-    if (root.draftText.length > 0) return
-    if (event.key === Qt.Key_Down || event.text === "j") {
-      root.moveChat(1)
-      event.accepted = true
-      return
-    }
-    if (event.key === Qt.Key_Up || event.text === "k") {
-      root.moveChat(-1)
       event.accepted = true
     }
   }
@@ -223,7 +225,7 @@ Panel {
     gap: Style.space(16)
     contentWidth: panel.fittedContentWidth(Style.space(720))
     contentHeight: panel.cappedContentHeight(Style.space(540))
-    focusTarget: root.settingsVisible || !Models.hasId(selectedChatId) ? keyCatcher : draftField
+    focusTarget: keyCatcher
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -231,11 +233,15 @@ Panel {
       clip: true
       blocked: settingsForm.editing || draftField.activeFocus
       onMoveRequested: function(dx, dy) {
+        if (dx > 0) root.focusComposer()
         if (dy !== 0) root.moveChat(dy)
       }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onReturnRequested: root.sendDraft()
+      onReturnRequested: root.focusComposer()
+      onTextKey: function(t) {
+        if (t === "a") root.pickAttachment()
+      }
 
       Column {
         id: column
@@ -370,7 +376,6 @@ Panel {
               focus: false
               activeFocusOnTab: false
               ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-              onActiveFocusChanged: if (activeFocus) root.focusComposer()
 
               delegate: CursorSurface {
                 required property var modelData
@@ -516,7 +521,7 @@ Panel {
               anchors.right: parent.right
               anchors.bottom: composerRow.top
               anchors.bottomMargin: Style.space(8)
-              model: imsg ? imsg.messages : []
+              model: imsg ? imsg.displayMessages : []
               clip: true
               spacing: Style.space(6)
               boundsBehavior: Flickable.StopAtBounds
@@ -525,7 +530,6 @@ Panel {
               focus: false
               activeFocusOnTab: false
               ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-              onActiveFocusChanged: if (activeFocus) root.focusComposer()
 
               onCountChanged: if (root.pinThreadToEnd) root.stickThread()
               onContentHeightChanged: if (root.pinThreadToEnd) root.stickThread()
@@ -553,7 +557,7 @@ Panel {
               }
 
               delegate: Item {
-                visible: Models.messageText(modelData).length > 0
+                visible: Models.messageText(modelData).length > 0 || Models.hasLocalPhoto(modelData)
                 width: ListView.view ? ListView.view.width : 0
                 height: visible ? bubble.height : 0
 
@@ -563,24 +567,49 @@ Panel {
                   anchors.left: fromMe ? undefined : parent.left
                   anchors.right: fromMe ? parent.right : undefined
                   width: Math.round(parent.width * 0.78)
-                  implicitHeight: bubbleText.implicitHeight + Style.space(16)
+                  implicitHeight: bubbleCol.implicitHeight + Style.space(16)
                   radius: Style.cornerRadius
                   color: fromMe ? root.selectedFill : root.normalFill
                   borderSpec: fromMe
                     ? Border.none()
                     : Border.controlSpec("normal", root.fg, Color.accent)
 
-                  Text {
-                    id: bubbleText
+                  Column {
+                    id: bubbleCol
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.top: parent.top
                     anchors.margins: Style.space(8)
-                    wrapMode: Text.Wrap
-                    text: Models.messageText(modelData)
-                    color: root.fg
-                    font.family: root.family
-                    font.pixelSize: Style.font.body
+                    spacing: Style.space(4)
+
+                    Image {
+                      visible: Models.hasLocalPhoto(modelData)
+                      width: parent.width
+                      height: visible ? Math.min(Style.space(180), implicitHeight > 0 ? implicitHeight : Style.space(120)) : 0
+                      fillMode: Image.PreserveAspectFit
+                      asynchronous: true
+                      source: visible ? ("file://" + String(modelData.local_path)) : ""
+                    }
+
+                    Text {
+                      id: bubbleText
+                      width: parent.width
+                      visible: Models.messageText(modelData).length > 0
+                      wrapMode: Text.Wrap
+                      text: Models.messageText(modelData)
+                      color: root.fg
+                      font.family: root.family
+                      font.pixelSize: Style.font.body
+                    }
+
+                    Text {
+                      width: parent.width
+                      visible: bubble.fromMe && (modelData.send_state === "sending" || modelData.send_state === "failed")
+                      text: modelData.send_state === "failed" ? "Not delivered" : "Sending"
+                      color: modelData.send_state === "failed" ? root.urgent : root.dim
+                      font.family: root.family
+                      font.pixelSize: Style.font.caption
+                    }
                   }
                 }
               }
@@ -589,7 +618,7 @@ Panel {
             Text {
               anchors.centerIn: threadView
               width: threadView.width * 0.8
-              visible: (!imsg || !imsg.messages || imsg.messages.length === 0) && root.setupReady
+              visible: (!imsg || !imsg.displayMessages || imsg.displayMessages.length === 0) && root.setupReady
               horizontalAlignment: Text.AlignHCenter
               wrapMode: Text.WordWrap
               color: root.dim
@@ -605,9 +634,18 @@ Panel {
               anchors.bottom: parent.bottom
               spacing: Style.space(8)
 
+              Button {
+                id: photoBtn
+                text: "Photo"
+                foreground: root.fg
+                fontFamily: root.family
+                enabled: Models.hasId(selectedChatId) && imsg && !imsg.sending
+                onClicked: root.pickAttachment()
+              }
+
               TextField {
                 id: draftField
-                width: parent.width - sendBtn.width - parent.spacing
+                width: parent.width - sendBtn.width - photoBtn.width - parent.spacing * 2
                 foreground: root.fg
                 placeholderText: Models.hasId(selectedChatId) ? "Message" : "Select a conversation"
                 enabled: Models.hasId(selectedChatId)
@@ -616,7 +654,6 @@ Panel {
                 onAccepted: root.sendDraft()
                 Keys.priority: Keys.BeforeItem
                 Keys.onPressed: root.composerKey(event)
-                Component.onCompleted: root.focusComposer()
               }
 
               Button {
@@ -642,14 +679,27 @@ Panel {
     function onMessagesChanged() {
       if (root.pinThreadToEnd) root.stickThread()
     }
-    function onSendSeqChanged() {
-      root.draftText = ""
-      if (draftField) draftField.text = ""
-      root.focusComposer()
-      root.stickThread()
+    function onDisplayMessagesChanged() {
+      if (root.pinThreadToEnd) root.stickThread()
     }
-    function onSendingChanged() {
-      root.focusComposer()
+    function onFailedDraftChanged() {
+      if (!imsg || !imsg.failedDraft || imsg.failedDraft.length === 0) return
+      if (root.draftText.trim().length > 0) return
+      root.draftText = imsg.failedDraft
+      if (draftField) draftField.text = imsg.failedDraft
+    }
+  }
+
+  FileDialog {
+    id: photoDialog
+    title: "Send photo"
+    fileMode: FileDialog.OpenFile
+    nameFilters: ["Images (*.jpg *.jpeg *.png *.gif *.webp *.heic *.heif *.bmp)"]
+    onAccepted: {
+      var u = String(selectedFile)
+      if (u.indexOf("file://") === 0) u = decodeURIComponent(u.substring(7))
+      if (imsg) imsg.sendAttachment(selectedChatId, u)
+      root.stickThread()
     }
   }
 }

@@ -29,9 +29,13 @@ Chats stay empty until `imsg-sync` can reach BlueBubbles. Then log out and back 
 
 ## Usage
 
-Click the bar icon to open the panel. The first run is Settings until this machine is linked. After chats are cached, select a conversation to read it. Type a reply and press Enter or Send when the Mac link is live. The gear opens Settings later; Reconnect retries the Mac without restarting sync.
+Click the bar icon, or Super+Ctrl+I, to open the panel. The first run is Settings until this machine is linked. After chats are cached, j/k move conversations. l focuses the composer. Escape leaves the composer. Escape again closes the panel. Enter sends. a or Photo attaches an image. Replies appear in the thread as Sending, then drop that label when the Mac accepts them.
 
-The bar icon shows the unread count once conversations are cached.
+The gear opens Settings later. Reconnect retries the Mac without restarting sync. The bar icon shows the unread count once conversations are cached.
+
+```lua
+o.bind("SUPER + CTRL + I", "iMessage", "omarchy-shell shell toggle io.github.panic.imessage")
+```
 
 ## Configure
 

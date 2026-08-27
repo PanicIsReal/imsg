@@ -15,7 +15,8 @@ Item {
   property bool bridgeConnected: false
   property bool databaseReady: false
   property bool sending: false
-  property int sendSeq: 0
+  property var outgoing: []
+  property string failedDraft: ""
   property bool statusKnown: false
   property string lastError: ""
   property string sendError: ""
@@ -28,6 +29,18 @@ Item {
   })
   property bool settingsSaving: false
 
+  readonly property var displayMessages: {
+    var hist = root.messages || []
+    var extras = []
+    var oid = String(root.openChatId || "")
+    for (var i = 0; i < root.outgoing.length; i++) {
+      var o = root.outgoing[i]
+      if (String(o.chat_id) !== oid) continue
+      if (o.send_state === "sent") continue
+      extras.push(o)
+    }
+    return extras.length === 0 ? hist : hist.concat(extras)
+  }
   readonly property bool cacheReady: chats && chats.length > 0
   readonly property string linkState: {
     if (!connected && !cacheReady) return "waiting"
@@ -135,12 +148,87 @@ Item {
     startRequest(contactsProc, "contacts.authorize", {})
   }
 
+  function addOutgoing(row) {
+    root.outgoing = root.outgoing.concat([row])
+  }
+
+  function finishOutgoing(id, ok) {
+    var next = []
+    for (var i = 0; i < root.outgoing.length; i++) {
+      var o = root.outgoing[i]
+      if (String(o.id) === String(id)) {
+        if (ok) continue
+        next.push({
+          id: o.id,
+          chat_id: o.chat_id,
+          text: o.text,
+          is_from_me: true,
+          send_state: "failed",
+          created_at: o.created_at,
+          local_path: o.local_path || "",
+          attachments: o.attachments || []
+        })
+      } else if (o.send_state !== "sent") {
+        next.push(o)
+      }
+    }
+    root.outgoing = next
+  }
+
   function sendMessage(chatId, text) {
     if (!chatId || !text || text.trim().length === 0 || requestScript === "" || sendProc.running) return
     sendError = ""
+    failedDraft = ""
+    var id = "pending-" + Date.now()
+    var body = text.trim()
+    addOutgoing({
+      id: id,
+      chat_id: chatId,
+      text: body,
+      is_from_me: true,
+      send_state: "sending",
+      created_at: new Date().toISOString(),
+      local_path: "",
+      attachments: []
+    })
     sendProc.chatId = chatId
-    if (startRequest(sendProc, "messages.send", { chat_id: chatId, text: text.trim() })) {
+    sendProc.outgoingId = id
+    sendProc.restoreText = body
+    if (startRequest(sendProc, "messages.send", { chat_id: chatId, text: body })) {
       sending = true
+    } else {
+      finishOutgoing(id, false)
+      failedDraft = body
+      sendError = ImsgClient.friendlyError("send failed")
+    }
+  }
+
+  function sendAttachment(chatId, path) {
+    if (!chatId || !path || String(path).length === 0 || requestScript === "" || sendProc.running) return
+    sendError = ""
+    failedDraft = ""
+    var id = "pending-" + Date.now()
+    var filePath = String(path)
+    var slash = filePath.lastIndexOf("/")
+    var name = slash >= 0 ? filePath.substring(slash + 1) : filePath
+    addOutgoing({
+      id: id,
+      chat_id: chatId,
+      text: "",
+      is_from_me: true,
+      send_state: "sending",
+      created_at: new Date().toISOString(),
+      local_path: filePath,
+      attachments: [{ name: name }]
+    })
+    sendProc.chatId = chatId
+    sendProc.outgoingId = id
+    sendProc.restoreText = ""
+    if (startRequest(sendProc, "messages.send_attachment", { chat_id: chatId, path: filePath })) {
+      sending = true
+    } else {
+      finishOutgoing(id, false)
+      sendError = ImsgClient.friendlyError("send failed")
     }
   }
 
@@ -312,6 +400,8 @@ Item {
     command: []
     property string payload: ""
     property var chatId: ""
+    property string outgoingId: ""
+    property string restoreText: ""
     property string stderrText: ""
     stdinEnabled: true
     onStarted: {
@@ -323,13 +413,17 @@ Item {
       onStreamFinished: {
         var res = ImsgClient.parseResponse(text)
         if (res && res.ok) {
+          root.finishOutgoing(sendProc.outgoingId, true)
           root.sendError = ""
-          root.sendSeq += 1
           root.loadMessages(sendProc.chatId, null)
           root.refreshChats()
         } else if (res && res.error) {
+          root.finishOutgoing(sendProc.outgoingId, false)
+          root.failedDraft = sendProc.restoreText
           root.sendError = ImsgClient.friendlyError(res.error.message || "send failed")
         } else {
+          root.finishOutgoing(sendProc.outgoingId, false)
+          root.failedDraft = sendProc.restoreText
           root.sendError = ImsgClient.friendlyError("send failed")
         }
       }
@@ -340,10 +434,14 @@ Item {
     }
     onExited: function(exitCode) {
       root.sending = false
-      if (exitCode !== 0) {
+      if (exitCode !== 0 && (!root.sendError || root.sendError.length === 0)) {
+        root.finishOutgoing(sendProc.outgoingId, false)
+        if (sendProc.restoreText.length > 0) root.failedDraft = sendProc.restoreText
         root.sendError = ImsgClient.friendlyError(sendProc.stderrText.trim() || ("send failed (code " + exitCode + ")"))
       }
       sendProc.stderrText = ""
+      sendProc.outgoingId = ""
+      sendProc.restoreText = ""
     }
   }
 
