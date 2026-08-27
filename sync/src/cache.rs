@@ -181,6 +181,14 @@ impl MessageCache {
         Ok(row.map(|r| r.get("guid")))
     }
 
+    pub async fn identifier_for_chat_id(&self, id: i64) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT identifier FROM chats WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|r| r.get::<Option<String>, _>("identifier")))
+    }
+
     pub async fn upsert_domain_chat(&self, chat: &crate::domain::Chat) -> Result<i64> {
         let id = self.id_for_guid(chat.guid.as_str()).await?;
         self.upsert_chat(&chat.to_cache_json(id)).await?;

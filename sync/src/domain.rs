@@ -8,6 +8,18 @@ pub struct ChatGuid(String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MessageGuid(String);
 
+pub fn attachment_form_guid(chat_guid: &ChatGuid, identifier: &str) -> String {
+    if chat_guid.is_group() {
+        return chat_guid.as_str().to_string();
+    }
+    let ident = identifier.trim();
+    if ident.is_empty() {
+        chat_guid.as_str().to_string()
+    } else {
+        ident.to_string()
+    }
+}
+
 impl ChatGuid {
     pub fn parse(raw: impl AsRef<str>) -> Result<Self> {
         let s = raw.as_ref().trim();
@@ -454,6 +466,18 @@ mod tests {
         let group = ChatGuid::parse("iMessage;+;chat123").unwrap();
         assert!(group.is_group());
         assert!(ChatGuid::parse("").is_err());
+        assert_eq!(
+            attachment_form_guid(&dm, "+15551234567"),
+            "+15551234567"
+        );
+        assert_eq!(
+            attachment_form_guid(&ChatGuid::parse("any;-;+17803700650").unwrap(), "+17803700650"),
+            "+17803700650"
+        );
+        assert_eq!(
+            attachment_form_guid(&group, "chat123"),
+            "iMessage;+;chat123"
+        );
     }
 
     #[test]
