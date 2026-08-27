@@ -269,14 +269,14 @@ async fn dispatch(
         }
         "chats.list" => {
             let guard = cache.read().await;
-            let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+            let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(80);
             let chats = guard.list_chats(limit).await?;
             Ok(json!({"chats": chats}))
         }
         "messages.history" => {
             let guard = cache.read().await;
             let chat_id = crate::domain::parse_json_id(&params["chat_id"]).context("chat_id required")?;
-            let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+            let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(200);
             let before = params.get("before").and_then(|v| v.as_str());
             let messages = guard.list_messages(chat_id, limit, before).await?;
             Ok(json!({"messages": messages}))

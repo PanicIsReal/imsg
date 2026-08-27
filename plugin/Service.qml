@@ -15,6 +15,7 @@ Item {
   property bool bridgeConnected: false
   property bool databaseReady: false
   property bool sending: false
+  property int sendSeq: 0
   property bool statusKnown: false
   property string lastError: ""
   property string sendError: ""
@@ -114,7 +115,7 @@ Item {
   }
 
   function refreshChats() {
-    startRequest(chatsProc, "chats.list", { limit: 50 })
+    startRequest(chatsProc, "chats.list", { limit: 80 })
   }
 
   function refreshStatus() {
@@ -123,7 +124,7 @@ Item {
 
   function loadMessages(chatId, before) {
     if (!chatId) return
-    var params = { chat_id: chatId, limit: 50 }
+    var params = { chat_id: chatId, limit: 200 }
     if (before) params.before = before
     historyProc.beforeCursor = before || ""
     startRequest(historyProc, "messages.history", params)
@@ -323,10 +324,13 @@ Item {
         var res = ImsgClient.parseResponse(text)
         if (res && res.ok) {
           root.sendError = ""
+          root.sendSeq += 1
           root.loadMessages(sendProc.chatId, null)
           root.refreshChats()
         } else if (res && res.error) {
           root.sendError = ImsgClient.friendlyError(res.error.message || "send failed")
+        } else {
+          root.sendError = ImsgClient.friendlyError("send failed")
         }
       }
     }

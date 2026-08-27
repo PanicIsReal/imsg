@@ -19,6 +19,7 @@ Panel {
   property string draftText: ""
   property int phraseIndex: 0
   property bool settingsOpen: false
+  property bool pinThreadToEnd: true
 
   readonly property var barIdentity: hostWidget || root
   readonly property color fg: bar ? bar.foreground : Color.foreground
@@ -87,6 +88,7 @@ Panel {
       imsg.refreshStatus()
       if (Models.hasId(selectedChatId)) openChat(selectedChatId)
       else maybeSelectFirst()
+      root.focusComposer()
     }
   }
 
@@ -109,16 +111,56 @@ Panel {
   function openChat(chatId) {
     selectedChatId = String(chatId || "")
     draftText = ""
+    root.pinThreadToEnd = true
     if (imsg) {
       imsg.openChatId = selectedChatId
       imsg.loadMessages(selectedChatId, null)
     }
+    root.stickThread()
+    root.focusComposer()
   }
 
   function sendDraft() {
-    if (!imsg || !Models.hasId(selectedChatId) || draftText.trim().length === 0) return
+    if (!imsg || !Models.hasId(selectedChatId) || draftText.trim().length === 0 || imsg.sending) return
     imsg.sendMessage(selectedChatId, draftText)
-    draftText = ""
+  }
+
+  function focusComposer() {
+    if (root.settingsVisible) return
+    if (Models.hasId(selectedChatId) && draftField.enabled) draftField.forceActiveFocus()
+    else keyCatcher.forceActiveFocus()
+  }
+
+  function stickThread() {
+    if (!root.pinThreadToEnd || !threadView || threadView.count <= 0) return
+    threadView.positionViewAtIndex(threadView.count - 1, ListView.End)
+    Qt.callLater(function () {
+      if (!root.pinThreadToEnd || threadView.count <= 0) return
+      threadView.positionViewAtIndex(threadView.count - 1, ListView.End)
+    })
+  }
+
+  function composerKey(event) {
+    if (event.key === Qt.Key_Escape) {
+      root.close()
+      event.accepted = true
+      return
+    }
+    if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+      root.switchPanel((event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab ? -1 : 1)
+      event.accepted = true
+      return
+    }
+    if (root.draftText.length > 0) return
+    if (event.key === Qt.Key_Down || event.text === "j") {
+      root.moveChat(1)
+      event.accepted = true
+      return
+    }
+    if (event.key === Qt.Key_Up || event.text === "k") {
+      root.moveChat(-1)
+      event.accepted = true
+    }
   }
 
   function moveChat(delta) {
@@ -130,6 +172,7 @@ Panel {
     if (i >= imsg.chats.length) i = 0
     var n = Math.max(0, Math.min(imsg.chats.length - 1, i + delta))
     openChat(imsg.chats[n].id)
+    chatList.positionViewAtIndex(n, ListView.Contain)
   }
 
   function call(method, args) {
@@ -178,20 +221,21 @@ Panel {
     open: root.opened
     centerOnBar: true
     gap: Style.space(16)
-    focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(720))
     contentHeight: panel.cappedContentHeight(Style.space(540))
+    focusTarget: root.settingsVisible || !Models.hasId(selectedChatId) ? keyCatcher : draftField
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       clip: true
-      blocked: draftField.activeFocus || settingsForm.editing
+      blocked: settingsForm.editing || draftField.activeFocus
       onMoveRequested: function(dx, dy) {
         if (dy !== 0) root.moveChat(dy)
       }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      onReturnRequested: root.sendDraft()
 
       Column {
         id: column
@@ -321,7 +365,12 @@ Panel {
               clip: true
               spacing: Style.space(6)
               boundsBehavior: Flickable.StopAtBounds
+              highlightFollowsCurrentItem: false
+              currentIndex: -1
+              focus: false
+              activeFocusOnTab: false
               ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+              onActiveFocusChanged: if (activeFocus) root.focusComposer()
 
               delegate: CursorSurface {
                 required property var modelData
@@ -471,9 +520,15 @@ Panel {
               clip: true
               spacing: Style.space(6)
               boundsBehavior: Flickable.StopAtBounds
+              highlightFollowsCurrentItem: false
+              currentIndex: -1
+              focus: false
+              activeFocusOnTab: false
               ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+              onActiveFocusChanged: if (activeFocus) root.focusComposer()
 
-              onCountChanged: if (count > 0) positionViewAtEnd()
+              onCountChanged: if (root.pinThreadToEnd) root.stickThread()
+              onContentHeightChanged: if (root.pinThreadToEnd) root.stickThread()
 
               header: Item {
                 width: threadView.width
@@ -489,7 +544,10 @@ Panel {
                   onClicked: {
                     if (!imsg || imsg.messages.length === 0) return
                     var oldest = imsg.messages[0]
-                    if (oldest && oldest.created_at) imsg.loadMessages(selectedChatId, oldest.created_at)
+                    if (oldest && oldest.created_at) {
+                      root.pinThreadToEnd = false
+                      imsg.loadMessages(selectedChatId, oldest.created_at)
+                    }
                   }
                 }
               }
@@ -552,10 +610,13 @@ Panel {
                 width: parent.width - sendBtn.width - parent.spacing
                 foreground: root.fg
                 placeholderText: Models.hasId(selectedChatId) ? "Message" : "Select a conversation"
-                enabled: Models.hasId(selectedChatId) && imsg && !imsg.sending
+                enabled: Models.hasId(selectedChatId)
                 text: root.draftText
                 onTextChanged: root.draftText = text
                 onAccepted: root.sendDraft()
+                Keys.priority: Keys.BeforeItem
+                Keys.onPressed: root.composerKey(event)
+                Component.onCompleted: root.focusComposer()
               }
 
               Button {
@@ -577,6 +638,18 @@ Panel {
     target: imsg
     function onChatsChanged() {
       if (root.opened) root.maybeSelectFirst()
+    }
+    function onMessagesChanged() {
+      if (root.pinThreadToEnd) root.stickThread()
+    }
+    function onSendSeqChanged() {
+      root.draftText = ""
+      if (draftField) draftField.text = ""
+      root.focusComposer()
+      root.stickThread()
+    }
+    function onSendingChanged() {
+      root.focusComposer()
     }
   }
 }
