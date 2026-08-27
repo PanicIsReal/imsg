@@ -11,6 +11,13 @@ pub type UplinkError = BbError;
 pub struct UplinkHandle(Arc<RwLock<Option<Arc<BlueBubbles>>>>);
 
 impl UplinkHandle {
+    pub async fn mark_read(&self, guid: &ChatGuid) -> Result<(), UplinkError> {
+        let Some(bb) = self.0.read().await.clone() else {
+            return Ok(());
+        };
+        bb.mark_read(guid).await
+    }
+
     pub async fn send_text(&self, guid: &ChatGuid, text: &str) -> Result<Message, UplinkError> {
         let bb = self.0.read().await.clone().ok_or(UplinkError::LinkDown)?;
         bb.send_text(guid, text).await

@@ -21,6 +21,8 @@ Panel {
   property int phraseIndex: 0
   property bool settingsOpen: false
   property bool pinThreadToEnd: true
+  property bool stickingThread: false
+  property int stickGen: 0
 
   readonly property var barIdentity: hostWidget || root
   readonly property color fg: bar ? bar.foreground : Color.foreground
@@ -114,6 +116,7 @@ Panel {
     root.pinThreadToEnd = true
     if (imsg) {
       imsg.openChatId = selectedChatId
+      imsg.markRead(selectedChatId)
       imsg.loadMessages(selectedChatId, null)
     }
     root.stickThread()
@@ -144,12 +147,21 @@ Panel {
     keyCatcher.forceActiveFocus()
   }
 
+  function threadAtEnd() {
+    if (!threadView || threadView.height <= 0) return true
+    return (threadView.contentHeight - threadView.height - threadView.contentY) <= 24
+  }
+
   function stickThread() {
-    if (!root.pinThreadToEnd || !threadView || threadView.count <= 0) return
-    threadView.positionViewAtIndex(threadView.count - 1, ListView.End)
+    if (!root.pinThreadToEnd || !threadView) return
+    var gen = ++root.stickGen
+    root.stickingThread = true
+    if (threadView.count > 0) threadView.positionViewAtIndex(threadView.count - 1, ListView.End)
     Qt.callLater(function () {
-      if (!root.pinThreadToEnd || threadView.count <= 0) return
-      threadView.positionViewAtIndex(threadView.count - 1, ListView.End)
+      if (gen !== root.stickGen) return
+      if (root.pinThreadToEnd && threadView.count > 0)
+        threadView.positionViewAtIndex(threadView.count - 1, ListView.End)
+      root.stickingThread = false
     })
   }
 
@@ -533,6 +545,11 @@ Panel {
 
               onCountChanged: if (root.pinThreadToEnd) root.stickThread()
               onContentHeightChanged: if (root.pinThreadToEnd) root.stickThread()
+              onContentYChanged: {
+                if (root.stickingThread) return
+                if (moving || flicking || dragging) root.pinThreadToEnd = root.threadAtEnd()
+              }
+              onMovementEnded: if (!root.stickingThread) root.pinThreadToEnd = root.threadAtEnd()
 
               header: Item {
                 width: threadView.width
@@ -675,6 +692,13 @@ Panel {
     target: imsg
     function onChatsChanged() {
       if (root.opened) root.maybeSelectFirst()
+      if (!imsg || !Models.hasId(selectedChatId) || !imsg.chats) return
+      for (var i = 0; i < imsg.chats.length; i++) {
+        if (Models.sameId(imsg.chats[i].id, selectedChatId) && (imsg.chats[i].unread_count || 0) > 0) {
+          imsg.markRead(selectedChatId)
+          break
+        }
+      }
     }
     function onMessagesChanged() {
       if (root.pinThreadToEnd) root.stickThread()

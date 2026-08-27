@@ -251,6 +251,16 @@ async fn dispatch(
                 "names_visible": names_visible
             }))
         }
+        "chats.mark_read" => {
+            let chat_id = crate::domain::parse_json_id(&params["chat_id"]).context("chat_id required")?;
+            let chat = cache.write().await.mark_read(chat_id).await?;
+            if let Some(guid) = cache.read().await.guid_for_chat_id(chat_id).await? {
+                if let Ok(guid) = ChatGuid::parse(guid) {
+                    let _ = link.uplink().mark_read(&guid).await;
+                }
+            }
+            Ok(json!({"chat": chat}))
+        }
         "messages.send" => {
             let chat_id = crate::domain::parse_json_id(&params["chat_id"]).context("chat_id required")?;
             let text = params["text"].as_str().context("text required")?;

@@ -189,6 +189,26 @@ impl MessageCache {
         Ok(row.and_then(|r| r.get::<Option<String>, _>("identifier")))
     }
 
+    pub async fn mark_read(&self, chat_id: i64) -> Result<Option<Value>> {
+        let row = sqlx::query("SELECT raw_json FROM chats WHERE id = ?")
+            .bind(chat_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let s: String = row.get("raw_json");
+        let mut chat: Value = serde_json::from_str(&s)?;
+        chat["unread_count"] = Value::from(0);
+        let patched = serde_json::to_string(&chat)?;
+        sqlx::query("UPDATE chats SET unread_count = 0, raw_json = ? WHERE id = ?")
+            .bind(&patched)
+            .bind(chat_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(Some(crate::domain::stringify_row_ids(chat)))
+    }
+
     pub async fn upsert_domain_chat(&self, chat: &crate::domain::Chat) -> Result<i64> {
         let id = self.id_for_guid(chat.guid.as_str()).await?;
         self.upsert_chat(&chat.to_cache_json(id)).await?;
@@ -249,7 +269,8 @@ impl MessageCache {
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  name=excluded.name, last_message_at=excluded.last_message_at,
-                 unread_count=excluded.unread_count, raw_json=excluded.raw_json"#,
+                 unread_count=chats.unread_count,
+                 raw_json=json_set(excluded.raw_json, '$.unread_count', chats.unread_count)"#,
         )
         .bind(id)
         .bind(chat["guid"].as_str())
@@ -676,6 +697,47 @@ mod tests {
         };
         assert_eq!(after_second["unread_count"], 1);
         assert_eq!(cache.list_chats(10).await.unwrap()[0]["unread_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn upsert_chat_keeps_local_unread_on_conflict() {
+        let dir = tempdir().unwrap();
+        let cache = MessageCache::open(&dir.path().join("cache.db"))
+            .await
+            .unwrap();
+        cache
+            .upsert_chat(&serde_json::json!({
+                "id": 1,
+                "name": "Pat",
+                "identifier": "+1",
+                "unread_count": 0
+            }))
+            .await
+            .unwrap();
+        cache
+            .apply_live_message(&serde_json::json!({
+                "id": 10,
+                "chat_id": 1,
+                "text": "hello",
+                "created_at": "2026-01-02T12:00:00Z",
+                "is_from_me": false
+            }))
+            .await
+            .unwrap();
+        assert_eq!(cache.list_chats(10).await.unwrap()[0]["unread_count"], 1);
+        cache
+            .upsert_chat(&serde_json::json!({
+                "id": 1,
+                "name": "Pat",
+                "identifier": "+1",
+                "unread_count": 9
+            }))
+            .await
+            .unwrap();
+        let chat = &cache.list_chats(10).await.unwrap()[0];
+        assert_eq!(chat["unread_count"], 1);
+        cache.mark_read(1).await.unwrap();
+        assert_eq!(cache.list_chats(10).await.unwrap()[0]["unread_count"], 0);
     }
 
     #[tokio::test]

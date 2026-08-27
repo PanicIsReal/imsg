@@ -120,6 +120,18 @@ impl BlueBubbles {
             .map_err(|e| BbError::Upstream(e.to_string()))
     }
 
+    pub async fn mark_read(&self, chat: &ChatGuid) -> Result<(), BbError> {
+        let encoded = path_encode(chat.as_str());
+        match self
+            .post(&format!("api/v1/chat/{encoded}/read"), json!({}))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(BbError::Upstream(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     pub async fn send_text(&self, chat: &ChatGuid, text: &str) -> Result<Message, BbError> {
         let temp = format!("temp-{}", Uuid::new_v4());
         let body = self
