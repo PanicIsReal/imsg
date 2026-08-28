@@ -78,7 +78,9 @@ password. Poll is off while the webhook is on.
 
 1. In Settings, set the Serve URL (MagicDNS HTTPS origin for this Linux box).
 2. Pick a port if 18792 is taken. Enable webhook.
-3. On Linux, publish localhost only. Do not use Funnel.
+3. On Linux, click **Publish with Tailscale** in Settings. That opens the
+same floating Omarchy window as install, and runs `tailscale serve` for the
+port in the form. Do not use Funnel. To do it by hand:
 
 ```sh
 tailscale serve --bg localhost:18792

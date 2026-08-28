@@ -6,6 +6,7 @@ import qs.Commons
 import qs.Ui
 import "js/Models.js" as Models
 import "js/Store.js" as Store
+import "js/ImsgClient.js" as ImsgClient
 
 Panel {
   id: root
@@ -332,6 +333,11 @@ Panel {
             onWebhookRegisterRequested: if (imsg) imsg.registerWebhook()
             onWebhookRotateRequested: if (imsg) imsg.rotateWebhookToken()
             onWebhookCopyRequested: if (imsg) imsg.loadWebhookUrl()
+            onWebhookServeRequested: function (port) {
+              var cmd = ImsgClient.webhookServeLaunchCommand(port)
+              if (root.bar && typeof root.bar.run === "function") root.bar.run(cmd)
+              else Util.execDetached(cmd)
+            }
           }
         }
 

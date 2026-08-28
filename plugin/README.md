@@ -41,10 +41,11 @@ imsg setup connect --url http://<mac-tailscale-ip>:1234 --password <password>
 
 Prefer the panel form so the password does not land in shell history.
 
-Settings can enable a localhost webhook. Run `tailscale serve --bg localhost:18792`
-on Linux, copy the URL, then Register once the Mac link is live. Restrict the
-Serve ACL to your Mac. Messages still come from REST. Poll is off while the webhook
-is on.
+Settings can enable a localhost webhook. Click **Publish with Tailscale** to
+run `tailscale serve` for the port in the form, or run
+`tailscale serve --bg localhost:18792` yourself. Copy the URL, then Register
+once the Mac link is live. Restrict the Serve ACL to your Mac. Messages still
+come from REST. Poll is off while the webhook is on.
 
 ## Use
 

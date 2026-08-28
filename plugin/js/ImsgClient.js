@@ -47,6 +47,22 @@ function flag(value) {
   return value === true || value === 1 || value === "true"
 }
 
+function clampWebhookPort(port) {
+  var n = parseInt(port, 10)
+  if (!isFinite(n) || n < 1 || n > 65535) return 18792
+  return n
+}
+
+function webhookServeScript(port) {
+  var target = "localhost:" + clampWebhookPort(port)
+  return "echo Publishing " + target + " on your tailnet...; tailscale serve --bg --yes " + target + "; echo; tailscale serve status"
+}
+
+function webhookServeLaunchCommand(port) {
+  var inner = webhookServeScript(port)
+  return "omarchy-launch-floating-terminal-with-presentation '" + String(inner).replace(/'/g, "'\\''") + "'"
+}
+
 function friendlyError(err) {
   var s = String(err || "")
   if (s.length === 0) return ""

@@ -103,4 +103,24 @@ assert.notEqual(Client.friendlyError("database_unavailable"), "Mac Messages data
 assert.notEqual(Client.friendlyError("Full Disk Access required"), "Mac Messages database is locked")
 assert.notEqual(Client.friendlyError("Database unavailable"), "Mac Messages database is locked")
 
+assert.equal(Client.clampWebhookPort(8080), 8080)
+assert.equal(Client.clampWebhookPort("18792"), 18792)
+assert.equal(Client.clampWebhookPort(0), 18792)
+assert.equal(Client.clampWebhookPort("nope"), 18792)
+assert.equal(Client.clampWebhookPort(65536), 18792)
+assert.equal(Client.clampWebhookPort(-3), 18792)
+
+const serveScript = Client.webhookServeScript(8080)
+assert.equal(serveScript.includes("tailscale serve --bg --yes localhost:8080"), true)
+assert.equal(serveScript.includes("tailscale serve status"), true)
+assert.equal(/funnel/i.test(serveScript), false)
+const injected = Client.webhookServeScript("8080; rm -rf /")
+assert.equal(injected.includes("rm"), false)
+assert.equal(injected.includes("localhost:8080"), true)
+
+const launch = Client.webhookServeLaunchCommand(18792)
+assert.equal(launch.startsWith("omarchy-launch-floating-terminal-with-presentation '"), true)
+assert.equal(launch.includes("funnel"), false)
+assert.equal(launch.includes("localhost:18792"), true)
+
 console.log("plugin-status.test.mjs ok")

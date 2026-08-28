@@ -37,6 +37,7 @@ Column {
   signal webhookRegisterRequested()
   signal webhookRotateRequested()
   signal webhookCopyRequested()
+  signal webhookServeRequested(int port)
 
   onServerUrlChanged: {
     if (!urlField.activeFocus) urlField.text = root.serverUrl
@@ -185,8 +186,24 @@ Column {
 
   function webhookPortValue() {
     var port = parseInt(portField.text, 10)
-    if (!port) port = 18792
+    if (!port || port < 1 || port > 65535) port = 18792
     return port
+  }
+
+  Button {
+    width: parent.width
+    text: "Publish with Tailscale"
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    bordered: true
+    background: root.actionFill
+    enabled: !root.saving
+    opacity: enabled ? 1 : 0.4
+    onClicked: {
+      var port = root.webhookPortValue()
+      root.webhookSaveRequested(root.webhookEnabled, port, serveField.text.trim())
+      root.webhookServeRequested(port)
+    }
   }
 
   Toggle {
