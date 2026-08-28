@@ -70,6 +70,26 @@ imsg setup connect --url http://<mac-tailscale-ip>:1234 --password <password>
 Prefer the panel form so the password does not land in shell history.
 Reconnect from Settings retries the Mac without restarting the daemon.
 
+### Optional webhook
+
+Live mail defaults to a 2s REST poll. Settings can switch to a webhook doorbell.
+The POST is not mail. imsg-sync then pulls the real message over REST with the
+password. Poll is off while the webhook is on.
+
+1. In Settings, set the Serve URL (MagicDNS HTTPS origin for this Linux box).
+2. Pick a port if 18792 is taken. Enable webhook.
+3. On Linux, publish localhost only. Do not use Funnel.
+
+```sh
+tailscale serve --bg localhost:18792
+```
+
+4. Copy the webhook URL. Treat the token like a password.
+5. Connect to BlueBubbles, then click Register webhook.
+
+Prefer a Tailscale ACL that allows only `macmini` to this machine's Serve port.
+9443 is the Mac BlueBubbles Serve. It is not this listener.
+
 ## Use
 
 Click the bar icon, or Super+Ctrl+I, to open the panel. j/k move conversations.
