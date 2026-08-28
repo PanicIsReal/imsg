@@ -139,6 +139,7 @@ Column {
   }
 
   Button {
+    width: parent.width
     text: root.helpOpen ? "Hide webhook help" : "Why a webhook?"
     foreground: root.foreground
     fontFamily: root.fontFamily
@@ -181,66 +182,61 @@ Column {
     if (!serveField.activeFocus) serveField.text = root.webhookServeUrl
   }
 
-  Row {
+  Button {
     width: parent.width
-    spacing: Style.space(8)
-
-    Button {
-      text: root.webhookEnabled ? "Disable webhook" : "Enable webhook"
-      foreground: root.foreground
-      fontFamily: root.fontFamily
-      enabled: !root.saving
-      onClicked: {
-        var port = parseInt(portField.text, 10)
-        if (!port) port = 18792
-        root.webhookSaveRequested(!root.webhookEnabled, port, serveField.text.trim())
-      }
-    }
-
-    Button {
-      text: "Save port"
-      foreground: root.foreground
-      fontFamily: root.fontFamily
-      bordered: true
-      enabled: !root.saving
-      onClicked: {
-        var port = parseInt(portField.text, 10)
-        if (!port) port = 18792
-        root.webhookSaveRequested(root.webhookEnabled, port, serveField.text.trim())
-      }
+    text: root.webhookEnabled ? "Disable webhook" : "Enable webhook"
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    enabled: !root.saving
+    onClicked: {
+      var port = parseInt(portField.text, 10)
+      if (!port) port = 18792
+      root.webhookSaveRequested(!root.webhookEnabled, port, serveField.text.trim())
     }
   }
 
-  Row {
+  Button {
     width: parent.width
-    spacing: Style.space(8)
-
-    Button {
-      text: "Register webhook"
-      foreground: root.foreground
-      fontFamily: root.fontFamily
-      enabled: !root.saving && root.session === "live" && root.webhookEnabled
-      tooltipText: root.session === "live" ? "Create the webhook on BlueBubbles" : "Connect to BlueBubbles first"
-      onClicked: root.webhookRegisterRequested()
+    text: "Save port and URL"
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    bordered: true
+    enabled: !root.saving
+    onClicked: {
+      var port = parseInt(portField.text, 10)
+      if (!port) port = 18792
+      root.webhookSaveRequested(root.webhookEnabled, port, serveField.text.trim())
     }
+  }
 
-    Button {
-      text: "Copy URL"
-      foreground: root.foreground
-      fontFamily: root.fontFamily
-      bordered: true
-      enabled: !root.saving
-      onClicked: root.webhookCopyRequested()
-    }
+  Button {
+    width: parent.width
+    text: "Register webhook"
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    enabled: !root.saving && root.session === "live" && root.webhookEnabled
+    tooltipText: root.session === "live" ? "Create the webhook on BlueBubbles" : "Connect to BlueBubbles first"
+    onClicked: root.webhookRegisterRequested()
+  }
 
-    Button {
-      text: "Rotate token"
-      foreground: root.foreground
-      fontFamily: root.fontFamily
-      bordered: true
-      enabled: !root.saving && root.webhookEnabled
-      onClicked: root.webhookRotateRequested()
-    }
+  Button {
+    width: parent.width
+    text: "Copy URL"
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    bordered: true
+    enabled: !root.saving
+    onClicked: root.webhookCopyRequested()
+  }
+
+  Button {
+    width: parent.width
+    text: "Rotate token"
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    bordered: true
+    enabled: !root.saving && root.webhookEnabled
+    onClicked: root.webhookRotateRequested()
   }
 
   TextEdit {

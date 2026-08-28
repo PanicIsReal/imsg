@@ -295,33 +295,44 @@ Panel {
           }
         }
 
-        SettingsForm {
-          id: settingsForm
-          width: parent.width
+        Flickable {
+          id: settingsScroll
           visible: root.settingsVisible
-          serverUrl: imsg && imsg.settings ? imsg.settings.server_url : ""
-          passwordSet: imsg && imsg.settings ? !!imsg.settings.password_set : false
-          session: imsg && imsg.settings ? String(imsg.settings.session) : "unconfigured"
-          saving: !!(imsg && imsg.settingsSaving)
-          foreground: root.fg
-          fontFamily: root.family
-          lastError: imsg ? imsg.lastError : ""
-          webhookEnabled: !!(imsg && imsg.settings && imsg.settings.webhook_enabled)
-          webhookPort: imsg && imsg.settings && imsg.settings.webhook_port ? Number(imsg.settings.webhook_port) : 18792
-          webhookServeUrl: imsg && imsg.settings && imsg.settings.webhook_serve_url ? String(imsg.settings.webhook_serve_url) : ""
-          webhookListening: !!(imsg && imsg.settings && imsg.settings.webhook_listening)
-          webhookRegistered: !!(imsg && imsg.settings && imsg.settings.webhook_registered)
-          webhookCopyUrl: imsg ? String(imsg.webhookCopyUrl || "") : ""
-          onSaveRequested: function (url, password) {
-            if (imsg) imsg.saveSettings(url, password)
+          width: parent.width
+          height: parent.height - header.height - parent.spacing
+          clip: true
+          contentWidth: width
+          contentHeight: settingsForm.implicitHeight
+          boundsBehavior: Flickable.StopAtBounds
+          flickableDirection: Flickable.VerticalFlick
+
+          SettingsForm {
+            id: settingsForm
+            width: settingsScroll.width
+            serverUrl: imsg && imsg.settings ? imsg.settings.server_url : ""
+            passwordSet: imsg && imsg.settings ? !!imsg.settings.password_set : false
+            session: imsg && imsg.settings ? String(imsg.settings.session) : "unconfigured"
+            saving: !!(imsg && imsg.settingsSaving)
+            foreground: root.fg
+            fontFamily: root.family
+            lastError: imsg ? imsg.lastError : ""
+            webhookEnabled: !!(imsg && imsg.settings && imsg.settings.webhook_enabled)
+            webhookPort: imsg && imsg.settings && imsg.settings.webhook_port ? Number(imsg.settings.webhook_port) : 18792
+            webhookServeUrl: imsg && imsg.settings && imsg.settings.webhook_serve_url ? String(imsg.settings.webhook_serve_url) : ""
+            webhookListening: !!(imsg && imsg.settings && imsg.settings.webhook_listening)
+            webhookRegistered: !!(imsg && imsg.settings && imsg.settings.webhook_registered)
+            webhookCopyUrl: imsg ? String(imsg.webhookCopyUrl || "") : ""
+            onSaveRequested: function (url, password) {
+              if (imsg) imsg.saveSettings(url, password)
+            }
+            onReconnectRequested: if (imsg) imsg.reconnect()
+            onWebhookSaveRequested: function (enabled, port, serveUrl) {
+              if (imsg) imsg.saveWebhook(enabled, port, serveUrl)
+            }
+            onWebhookRegisterRequested: if (imsg) imsg.registerWebhook()
+            onWebhookRotateRequested: if (imsg) imsg.rotateWebhookToken()
+            onWebhookCopyRequested: if (imsg) imsg.loadWebhookUrl()
           }
-          onReconnectRequested: if (imsg) imsg.reconnect()
-          onWebhookSaveRequested: function (enabled, port, serveUrl) {
-            if (imsg) imsg.saveWebhook(enabled, port, serveUrl)
-          }
-          onWebhookRegisterRequested: if (imsg) imsg.registerWebhook()
-          onWebhookRotateRequested: if (imsg) imsg.rotateWebhookToken()
-          onWebhookCopyRequested: if (imsg) imsg.loadWebhookUrl()
         }
 
         Column {
