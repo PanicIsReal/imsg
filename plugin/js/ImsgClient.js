@@ -63,6 +63,32 @@ function webhookServeLaunchCommand(port) {
   return "omarchy-launch-floating-terminal-with-presentation '" + String(inner).replace(/'/g, "'\\''") + "'"
 }
 
+function webhookServeResetScript() {
+  return "echo Removing Tailscale Serve...; tailscale serve reset; echo; tailscale serve status"
+}
+
+function webhookServeResetLaunchCommand() {
+  var inner = webhookServeResetScript()
+  return "omarchy-launch-floating-terminal-with-presentation '" + String(inner).replace(/'/g, "'\\''") + "'"
+}
+
+function webhookServeIsActive(status) {
+  if (!status || typeof status !== "object") return false
+  var web = status.Web
+  if (web && typeof web === "object") {
+    for (var key in web) {
+      if (Object.prototype.hasOwnProperty.call(web, key)) return true
+    }
+  }
+  var tcp = status.TCP
+  if (tcp && typeof tcp === "object") {
+    for (var key in tcp) {
+      if (Object.prototype.hasOwnProperty.call(tcp, key)) return true
+    }
+  }
+  return false
+}
+
 function friendlyError(err) {
   var s = String(err || "")
   if (s.length === 0) return ""

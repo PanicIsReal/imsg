@@ -43,7 +43,8 @@ Prefer the panel form so the password does not land in shell history.
 
 Settings walks webhook setup in three steps. Turn on, publish with Tailscale,
 then register with BlueBubbles. Poll is off while the webhook is on. Messages
-still come from REST. Restrict the Serve ACL to your Mac.
+still come from REST. Restrict the Serve ACL to your Mac. Remove serve clears
+an active Tailscale Serve config.
 
 ## Use
 

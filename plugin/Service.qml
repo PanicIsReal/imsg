@@ -35,6 +35,7 @@ Item {
   })
   property bool settingsSaving: false
   property string webhookCopyUrl: ""
+  property bool serveActive: false
 
   readonly property var displayMessages: {
     var hist = root.messages || []
@@ -329,6 +330,15 @@ Item {
     startRequest(webhookUrlProc, "webhook.url", {})
   }
 
+  function refreshServeStatus() {
+    if (serveStatusProc.running) return
+    serveStatusProc.running = true
+  }
+
+  function refreshServeStatusSoon() {
+    serveSoonTimer.restart()
+  }
+
   function notifyInbound(sender, body, chatId) {
     var cmd = ImsgClient.notificationCommand(sender, body, chatId)
     if (notifyProc.running) {
@@ -346,6 +356,7 @@ Item {
     onTriggered: {
       root.refreshChats()
       root.refreshStatus()
+      root.refreshServeStatus()
     }
   }
 
@@ -644,9 +655,30 @@ Item {
     }
   }
 
+  Timer {
+    id: serveSoonTimer
+    interval: 1500
+    repeat: false
+    onTriggered: root.refreshServeStatus()
+  }
+
+  Process {
+    id: serveStatusProc
+    running: false
+    command: ["tailscale", "serve", "status", "--json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var parsed = ImsgClient.parseResponse(text)
+        root.serveActive = ImsgClient.webhookServeIsActive(parsed)
+      }
+    }
+  }
+
   Component.onCompleted: {
     refreshChats()
     refreshStatus()
+    refreshServeStatus()
     if (root.subscribeScript !== "") {
       streamProc.command = ImsgClient.streamCommand(root.subscribeScript)
       streamProc.running = true

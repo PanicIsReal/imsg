@@ -22,6 +22,7 @@ Column {
   property string webhookCopyUrl: ""
   property bool advancedOpen: false
   property bool serveOffered: false
+  property bool serveActive: false
 
   readonly property bool editing: urlField.activeFocus || passwordField.activeFocus
   readonly property color dim: Qt.darker(foreground, 1.4)
@@ -48,6 +49,7 @@ Column {
   signal webhookRotateRequested()
   signal webhookCopyRequested()
   signal webhookServeRequested(int port)
+  signal webhookServeResetRequested()
 
   onServerUrlChanged: {
     if (!urlField.activeFocus) urlField.text = root.serverUrl
@@ -238,6 +240,22 @@ Column {
     enabled: !root.saving
     opacity: enabled ? 1 : 0.4
     onClicked: root.runWebhookStep()
+  }
+
+  Button {
+    width: parent.width
+    visible: root.serveActive
+    text: "Remove serve"
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    bordered: true
+    background: root.actionFill
+    enabled: !root.saving
+    opacity: enabled ? 1 : 0.4
+    onClicked: {
+      root.webhookServeResetRequested()
+      root.serveOffered = false
+    }
   }
 
   Toggle {

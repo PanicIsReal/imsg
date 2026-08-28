@@ -323,6 +323,7 @@ Panel {
             webhookListening: !!(imsg && imsg.settings && imsg.settings.webhook_listening)
             webhookRegistered: !!(imsg && imsg.settings && imsg.settings.webhook_registered)
             webhookCopyUrl: imsg ? String(imsg.webhookCopyUrl || "") : ""
+            serveActive: !!(imsg && imsg.serveActive)
             onSaveRequested: function (url, password) {
               if (imsg) imsg.saveSettings(url, password)
             }
@@ -337,6 +338,13 @@ Panel {
               var cmd = ImsgClient.webhookServeLaunchCommand(port)
               if (root.bar && typeof root.bar.run === "function") root.bar.run(cmd)
               else Util.execDetached(cmd)
+              if (imsg) imsg.refreshServeStatusSoon()
+            }
+            onWebhookServeResetRequested: {
+              var cmd = ImsgClient.webhookServeResetLaunchCommand()
+              if (root.bar && typeof root.bar.run === "function") root.bar.run(cmd)
+              else Util.execDetached(cmd)
+              if (imsg) imsg.refreshServeStatusSoon()
             }
           }
         }

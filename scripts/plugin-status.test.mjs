@@ -123,6 +123,20 @@ assert.equal(launch.startsWith("omarchy-launch-floating-terminal-with-presentati
 assert.equal(launch.includes("funnel"), false)
 assert.equal(launch.includes("localhost:18792"), true)
 
+const resetLaunch = Client.webhookServeResetLaunchCommand()
+assert.equal(resetLaunch.includes("tailscale serve reset"), true)
+assert.equal(/funnel/i.test(resetLaunch), false)
+assert.equal(Client.webhookServeIsActive(null), false)
+assert.equal(Client.webhookServeIsActive({}), false)
+assert.equal(Client.webhookServeIsActive({ Web: {}, TCP: {} }), false)
+assert.equal(
+  Client.webhookServeIsActive({
+    Web: { "host:443": { Handlers: { "/": { Proxy: "http://localhost:18792" } } } },
+  }),
+  true,
+)
+assert.equal(Client.webhookServeIsActive({ TCP: { "443": { HTTPS: true } } }), true)
+
 function guidePhase(input) {
   return Store.webhookGuide(input).phase
 }

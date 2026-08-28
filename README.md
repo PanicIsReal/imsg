@@ -81,7 +81,8 @@ Tailscale, then register with BlueBubbles. Register is the step that is easy
 to skip. Incoming pokes do not start until it is done.
 
 The Tailscale step opens the same floating Omarchy window as install. It runs
-`tailscale serve` for the port in the form. Not Funnel. To do it by hand:
+`tailscale serve` for the port in the form. Not Funnel. **Remove serve** shows
+when Serve is active and runs `tailscale serve reset`. To publish by hand:
 
 ```sh
 tailscale serve --bg localhost:18792
