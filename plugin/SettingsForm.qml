@@ -23,6 +23,7 @@ Column {
 
   readonly property bool editing: urlField.activeFocus || passwordField.activeFocus
   readonly property color dim: Qt.darker(foreground, 1.4)
+  readonly property color actionFill: Qt.rgba(0, 0, 0, 0.35)
   readonly property string sessionCaption: {
     if (root.session === "live") return "Connected"
     if (root.session === "connecting") return "Connecting"
@@ -182,61 +183,83 @@ Column {
     if (!serveField.activeFocus) serveField.text = root.webhookServeUrl
   }
 
-  Button {
+  function webhookPortValue() {
+    var port = parseInt(portField.text, 10)
+    if (!port) port = 18792
+    return port
+  }
+
+  Toggle {
     width: parent.width
-    text: root.webhookEnabled ? "Disable webhook" : "Enable webhook"
+    label: "Toggle"
+    description: "Enable webhook"
+    checked: root.webhookEnabled
     foreground: root.foreground
     fontFamily: root.fontFamily
-    enabled: !root.saving
+    opacity: root.saving ? 0.55 : 1
     onClicked: {
-      var port = parseInt(portField.text, 10)
-      if (!port) port = 18792
-      root.webhookSaveRequested(!root.webhookEnabled, port, serveField.text.trim())
+      if (root.saving) return
+      root.webhookSaveRequested(!root.webhookEnabled, root.webhookPortValue(), serveField.text.trim())
     }
   }
 
-  Button {
+  Grid {
+    id: hookActions
     width: parent.width
-    text: "Save port and URL"
-    foreground: root.foreground
-    fontFamily: root.fontFamily
-    bordered: true
-    enabled: !root.saving
-    onClicked: {
-      var port = parseInt(portField.text, 10)
-      if (!port) port = 18792
-      root.webhookSaveRequested(root.webhookEnabled, port, serveField.text.trim())
+    columns: 2
+    columnSpacing: Style.space(8)
+    rowSpacing: Style.space(8)
+
+    readonly property real cellW: (width - columnSpacing) / 2
+
+    Button {
+      width: hookActions.cellW
+      text: "Save port and URL"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      bordered: true
+      background: root.actionFill
+      enabled: !root.saving
+      opacity: enabled ? 1 : 0.4
+      onClicked: root.webhookSaveRequested(root.webhookEnabled, root.webhookPortValue(), serveField.text.trim())
     }
-  }
 
-  Button {
-    width: parent.width
-    text: "Register webhook"
-    foreground: root.foreground
-    fontFamily: root.fontFamily
-    enabled: !root.saving && root.session === "live" && root.webhookEnabled
-    tooltipText: root.session === "live" ? "Create the webhook on BlueBubbles" : "Connect to BlueBubbles first"
-    onClicked: root.webhookRegisterRequested()
-  }
+    Button {
+      width: hookActions.cellW
+      text: "Register webhook"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      bordered: true
+      background: root.actionFill
+      enabled: !root.saving && root.session === "live" && root.webhookEnabled
+      opacity: enabled ? 1 : 0.4
+      tooltipText: root.session === "live" ? "Create the webhook on BlueBubbles" : "Connect to BlueBubbles first"
+      onClicked: root.webhookRegisterRequested()
+    }
 
-  Button {
-    width: parent.width
-    text: "Copy URL"
-    foreground: root.foreground
-    fontFamily: root.fontFamily
-    bordered: true
-    enabled: !root.saving
-    onClicked: root.webhookCopyRequested()
-  }
+    Button {
+      width: hookActions.cellW
+      text: "Copy URL"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      bordered: true
+      background: root.actionFill
+      enabled: !root.saving
+      opacity: enabled ? 1 : 0.4
+      onClicked: root.webhookCopyRequested()
+    }
 
-  Button {
-    width: parent.width
-    text: "Rotate token"
-    foreground: root.foreground
-    fontFamily: root.fontFamily
-    bordered: true
-    enabled: !root.saving && root.webhookEnabled
-    onClicked: root.webhookRotateRequested()
+    Button {
+      width: hookActions.cellW
+      text: "Rotate token"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      bordered: true
+      background: root.actionFill
+      enabled: !root.saving && root.webhookEnabled
+      opacity: enabled ? 1 : 0.4
+      onClicked: root.webhookRotateRequested()
+    }
   }
 
   TextEdit {
