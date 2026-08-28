@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 const SERVICE: &str = "imsg-sync";
 const ACCOUNT: &str = "bluebubbles";
+const WEBHOOK_ACCOUNT: &str = "webhook-token";
 
 #[derive(Clone, Debug)]
 pub(crate) enum SecretBackend {
@@ -37,8 +38,39 @@ pub(crate) fn store(backend: &SecretBackend, password: &Password) -> Result<()> 
     }
 }
 
+pub(crate) fn load_webhook(backend: &SecretBackend) -> Result<Option<Password>> {
+    match backend {
+        SecretBackend::Keyring => load_keyring_named(WEBHOOK_ACCOUNT),
+        #[cfg(test)]
+        SecretBackend::File(path) => load_file(&webhook_file(path)),
+    }
+}
+
+pub(crate) fn store_webhook(backend: &SecretBackend, token: &Password) -> Result<()> {
+    match backend {
+        SecretBackend::Keyring => store_keyring_named(WEBHOOK_ACCOUNT, token),
+        #[cfg(test)]
+        SecretBackend::File(path) => store_file(&webhook_file(path), token),
+    }
+}
+
+#[cfg(test)]
+fn webhook_file(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".webhook");
+    PathBuf::from(name)
+}
+
 fn load_keyring() -> Result<Option<Password>> {
-    let entry = keyring::Entry::new(SERVICE, ACCOUNT).context("keyring entry")?;
+    load_keyring_named(ACCOUNT)
+}
+
+fn store_keyring(password: &Password) -> Result<()> {
+    store_keyring_named(ACCOUNT, password)
+}
+
+fn load_keyring_named(account: &str) -> Result<Option<Password>> {
+    let entry = keyring::Entry::new(SERVICE, account).context("keyring entry")?;
     match entry.get_password() {
         Ok(raw) if raw.trim().is_empty() => Ok(None),
         Ok(raw) => Ok(Some(Password::new(raw)?)),
@@ -47,8 +79,8 @@ fn load_keyring() -> Result<Option<Password>> {
     }
 }
 
-fn store_keyring(password: &Password) -> Result<()> {
-    let entry = keyring::Entry::new(SERVICE, ACCOUNT).context("keyring entry")?;
+fn store_keyring_named(account: &str, password: &Password) -> Result<()> {
+    let entry = keyring::Entry::new(SERVICE, account).context("keyring entry")?;
     entry
         .set_password(password.as_str())
         .context("keyring store")

@@ -1,6 +1,6 @@
 use crate::cache::{ChatRow, MessageCache};
 use crate::domain::ChatGuid;
-use crate::link::{emit_sync_link, merge_view, Link, SettingsDraft};
+use crate::link::{emit_sync_link, merge_view, Link, SettingsDraft, WebhookDraft};
 use crate::uplink::UplinkError;
 use anyhow::{Context, Result};
 use imsg_proto::Envelope;
@@ -232,6 +232,54 @@ async fn dispatch(
             emit_sync_link(events, cache, &view).await;
             Ok(view.to_status_fields())
         }
+        "webhook.set" => {
+            let enabled = params["enabled"].as_bool().unwrap_or(false);
+            let port = params
+                .get("port")
+                .and_then(|p| p.as_u64())
+                .unwrap_or(crate::webhook::DEFAULT_PORT as u64) as u16;
+            let serve_url = params
+                .get("serve_url")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !enabled {
+                let _ = link.uplink().webhook_clear_ours().await;
+            }
+            let view = link
+                .apply_webhook(WebhookDraft {
+                    enabled,
+                    port,
+                    serve_url,
+                })
+                .await?;
+            emit_sync_link(events, cache, &view).await;
+            Ok(view.to_status_fields())
+        }
+        "webhook.url" => {
+            let url = link.webhook_copy_url()?;
+            Ok(json!({ "url": url }))
+        }
+        "webhook.rotate" => {
+            let _ = link.uplink().webhook_clear_ours().await;
+            let view = link.rotate_webhook_token().await?;
+            emit_sync_link(events, cache, &view).await;
+            Ok(view.to_status_fields())
+        }
+        "webhook.register" => {
+            if !link.uplink().is_up().await {
+                anyhow::bail!("Connect to BlueBubbles first");
+            }
+            let url = link.webhook_copy_url()?;
+            link.uplink()
+                .webhook_replace(&url)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            link.set_webhook_registered(true);
+            let view = link.view().await;
+            emit_sync_link(events, cache, &view).await;
+            Ok(view.to_status_fields())
+        }
         "contacts.authorize" => {
             let book = link.uplink().contact_book().await?;
             let n = cache.write().await.apply_contact_book(&book).await?;
@@ -398,8 +446,16 @@ mod tests {
     fn assert_no_password_key(value: &Value) {
         let obj = value.as_object().expect("object result");
         assert!(
-            !obj.keys().any(|k| k.eq_ignore_ascii_case("password")),
-            "result leaked a password key: {value}"
+            !obj.keys().any(|k| {
+                let n = k.to_ascii_lowercase();
+                n == "password" || n == "token" || n == "webhook_token"
+            }),
+            "result leaked a secret key: {value}"
+        );
+        let blob = value.to_string();
+        assert!(
+            !blob.contains("token="),
+            "status leaked a token query: {value}"
         );
     }
 
@@ -474,6 +530,44 @@ mod tests {
                 assert_eq!(payload["message"]["id"], 9);
             }
             other => panic!("expected sync.message event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn status_webhook_flags_have_no_token() {
+        let (_dir, sock, _events, _link) = boot().await;
+        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        write_req(&mut stream, "status", json!({})).await;
+        let env = read_res(stream).await;
+        match env {
+            Envelope::Res {
+                ok: true, result, ..
+            } => {
+                let result = result.unwrap();
+                assert_eq!(result["webhook_enabled"], false);
+                assert_eq!(result["webhook_port"], crate::webhook::DEFAULT_PORT);
+                assert_no_password_key(&result);
+            }
+            other => panic!("expected status res, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn webhook_url_includes_token_query() {
+        let (_dir, sock, _events, _link) = boot().await;
+        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        write_req(&mut stream, "webhook.url", json!({})).await;
+        let env = read_res(stream).await;
+        match env {
+            Envelope::Res {
+                ok: true, result, ..
+            } => {
+                let result = result.unwrap();
+                let url = result["url"].as_str().unwrap();
+                assert!(url.contains("/imsg/hook?"));
+                assert!(url.contains("token="));
+            }
+            other => panic!("expected webhook.url res, got {other:?}"),
         }
     }
 

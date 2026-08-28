@@ -124,6 +124,75 @@ impl BlueBubbles {
             .map_err(|e| BbError::Upstream(e.to_string()))
     }
 
+    pub async fn message_by_guid(&self, guid: &str) -> Result<Option<Message>, BbError> {
+        let encoded = path_encode(guid.trim());
+        let body = match self.get(&format!("api/v1/message/{encoded}")).await {
+            Ok(b) => b,
+            Err(BbError::Upstream(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let data = match envelope_data(&body) {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+        if data.is_null() {
+            return Ok(None);
+        }
+        match Message::from_bb(&data, None) {
+            Ok(m) => Ok(Some(m)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub async fn webhook_list(&self) -> Result<Vec<Value>, BbError> {
+        let body = self.get("api/v1/webhook").await?;
+        let data = envelope_data(&body)?;
+        Ok(data.as_array().cloned().unwrap_or_default())
+    }
+
+    pub async fn webhook_create(&self, url: &str) -> Result<(), BbError> {
+        self.post(
+            "api/v1/webhook",
+            json!({
+                "url": url,
+                "events": ["new-message", "updated-message"],
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn webhook_delete(&self, id: &str) -> Result<(), BbError> {
+        let encoded = path_encode(id.trim());
+        match self.delete(&format!("api/v1/webhook/{encoded}")).await {
+            Ok(_) => Ok(()),
+            Err(BbError::Upstream(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn webhook_replace(&self, url: &str) -> Result<(), BbError> {
+        let listed = self.webhook_list().await.unwrap_or_default();
+        for row in listed {
+            let existing = row
+                .get("url")
+                .and_then(|u| u.as_str())
+                .unwrap_or("");
+            let ours = existing.contains("/imsg/hook");
+            if !ours {
+                continue;
+            }
+            if let Some(id) = row
+                .get("guid")
+                .and_then(|g| g.as_str())
+                .or_else(|| row.get("id").and_then(|g| g.as_str()))
+            {
+                let _ = self.webhook_delete(id).await;
+            }
+        }
+        self.webhook_create(url).await
+    }
+
     pub async fn mark_read(&self, chat: &ChatGuid) -> Result<(), BbError> {
         let encoded = path_encode(chat.as_str());
         match self
@@ -239,6 +308,12 @@ impl BlueBubbles {
             .send()
             .await
             .map_err(transport)?;
+        read_json(res).await
+    }
+
+    async fn delete(&self, path: &str) -> Result<Value, BbError> {
+        let url = self.authed(path)?;
+        let res = self.http.delete(url).send().await.map_err(transport)?;
         read_json(res).await
     }
 

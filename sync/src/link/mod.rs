@@ -19,6 +19,12 @@ pub struct PublicView {
     pub server_url: Option<String>,
     pub password_set: bool,
     pub session: SessionState,
+    pub webhook_enabled: bool,
+    pub webhook_port: u16,
+    pub webhook_serve_url: String,
+    pub webhook_listening: bool,
+    pub webhook_registered: bool,
+    pub webhook_token_set: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -36,6 +42,12 @@ impl PublicView {
             "server_url": self.server_url,
             "password_set": self.password_set,
             "session": self.session,
+            "webhook_enabled": self.webhook_enabled,
+            "webhook_port": self.webhook_port,
+            "webhook_serve_url": self.webhook_serve_url,
+            "webhook_listening": self.webhook_listening,
+            "webhook_registered": self.webhook_registered,
+            "webhook_token_set": self.webhook_token_set,
         })
     }
 }
@@ -73,6 +85,12 @@ pub struct SettingsDraft {
     pub(crate) password: PasswordUpdate,
 }
 
+pub struct WebhookDraft {
+    pub enabled: bool,
+    pub port: u16,
+    pub serve_url: String,
+}
+
 impl SettingsDraft {
     pub fn from_input(url: &str, password: Option<&str>) -> Result<Self> {
         let server = coerce_server_url(url)?;
@@ -91,6 +109,9 @@ pub struct PublicConfig {
     pub socket_path: PathBuf,
     pub prefetch_chats: u32,
     pub prefetch_messages: u32,
+    pub webhook_enabled: bool,
+    pub webhook_port: u16,
+    pub webhook_serve_url: String,
 }
 
 #[derive(Clone)]
@@ -125,6 +146,8 @@ pub struct Link {
     wake: watch::Sender<u64>,
     _wake_hold: watch::Receiver<u64>,
     connecting: AtomicBool,
+    webhook_listening: AtomicBool,
+    webhook_registered: AtomicBool,
 }
 
 impl Link {
@@ -158,6 +181,8 @@ impl Link {
             wake,
             _wake_hold: wake_hold,
             connecting: AtomicBool::new(false),
+            webhook_listening: AtomicBool::new(false),
+            webhook_registered: AtomicBool::new(false),
         }))
     }
 
@@ -193,14 +218,24 @@ impl Link {
     pub async fn view(&self) -> PublicView {
         let provision = self.provision.read().await;
         match &*provision {
-            Provision::Empty => PublicView {
-                server_url: store::peek_server_url(&self.ctx)
-                    .ok()
-                    .flatten()
-                    .map(|u| u.as_str().to_string()),
-                password_set: store::password_set(&self.ctx).unwrap_or(false),
-                session: SessionState::Unconfigured,
-            },
+            Provision::Empty => {
+                let mut view = PublicView {
+                    server_url: store::peek_server_url(&self.ctx)
+                        .ok()
+                        .flatten()
+                        .map(|u| u.as_str().to_string()),
+                    password_set: store::password_set(&self.ctx).unwrap_or(false),
+                    session: SessionState::Unconfigured,
+                    webhook_enabled: false,
+                    webhook_port: crate::webhook::DEFAULT_PORT,
+                    webhook_serve_url: String::new(),
+                    webhook_listening: false,
+                    webhook_registered: false,
+                    webhook_token_set: false,
+                };
+                self.fill_webhook(&mut view);
+                view
+            }
             Provision::Ready(creds) => {
                 let session = if self.uplink.is_up().await {
                     SessionState::Live
@@ -209,11 +244,19 @@ impl Link {
                 } else {
                     SessionState::Down
                 };
-                PublicView {
+                let mut view = PublicView {
                     server_url: Some(creds.public.server.as_str().to_string()),
                     password_set: true,
                     session,
-                }
+                    webhook_enabled: creds.public.webhook_enabled,
+                    webhook_port: creds.public.webhook_port,
+                    webhook_serve_url: creds.public.webhook_serve_url.clone(),
+                    webhook_listening: false,
+                    webhook_registered: false,
+                    webhook_token_set: false,
+                };
+                self.fill_webhook(&mut view);
+                view
             }
         }
     }
@@ -239,6 +282,54 @@ impl Link {
 
     pub(crate) fn set_connecting(&self, value: bool) {
         self.connecting.store(value, Ordering::SeqCst);
+    }
+
+    pub(crate) fn set_webhook_listening(&self, value: bool) {
+        self.webhook_listening.store(value, Ordering::SeqCst);
+        if !value {
+            self.webhook_registered.store(false, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn set_webhook_registered(&self, value: bool) {
+        self.webhook_registered.store(value, Ordering::SeqCst);
+    }
+
+    fn fill_webhook(&self, view: &mut PublicView) {
+        let snap = store::peek_webhook(&self.ctx).unwrap_or_default();
+        view.webhook_enabled = snap.enabled;
+        view.webhook_port = snap.port;
+        view.webhook_serve_url = if snap.serve_url.is_empty() {
+            crate::webhook::guess_serve_origin().unwrap_or_default()
+        } else {
+            snap.serve_url
+        };
+        view.webhook_listening = self.webhook_listening.load(Ordering::SeqCst);
+        view.webhook_registered = self.webhook_registered.load(Ordering::SeqCst);
+        view.webhook_token_set = store::webhook_token_set(&self.ctx).unwrap_or(false);
+    }
+
+    pub async fn apply_webhook(&self, draft: WebhookDraft) -> Result<PublicView> {
+        store::commit_webhook(&self.ctx, draft)?;
+        if !store::peek_webhook(&self.ctx)?.enabled {
+            self.webhook_listening.store(false, Ordering::SeqCst);
+            self.webhook_registered.store(false, Ordering::SeqCst);
+        }
+        self.reconnect_from_store().await
+    }
+
+    pub async fn rotate_webhook_token(&self) -> Result<PublicView> {
+        store::rotate_webhook_token(&self.ctx)?;
+        self.webhook_registered.store(false, Ordering::SeqCst);
+        Ok(self.view().await)
+    }
+
+    pub fn webhook_copy_url(&self) -> Result<String> {
+        store::webhook_copy_url(&self.ctx)
+    }
+
+    pub(crate) fn store_ctx(&self) -> &store::StoreCtx {
+        &self.ctx
     }
 }
 
@@ -380,10 +471,18 @@ mod tests {
             server_url: Some("http://100.64.1.2:1234".into()),
             password_set: true,
             session: SessionState::Live,
+            webhook_enabled: false,
+            webhook_port: crate::webhook::DEFAULT_PORT,
+            webhook_serve_url: String::new(),
+            webhook_listening: false,
+            webhook_registered: false,
+            webhook_token_set: false,
         };
         let json = serde_json::to_string(&view).unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
         assert!(value.get("password").is_none());
+        assert!(value.get("token").is_none());
+        assert!(value.get("webhook_token").is_none());
         assert!(!value
             .as_object()
             .unwrap()

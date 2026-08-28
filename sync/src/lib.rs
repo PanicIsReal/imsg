@@ -7,6 +7,7 @@ pub mod domain;
 pub mod link;
 pub mod socket_server;
 pub mod uplink;
+pub mod webhook;
 
 pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();

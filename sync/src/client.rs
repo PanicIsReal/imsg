@@ -3,11 +3,12 @@ use crate::cache::{Applied, ChatRow, MessageCache};
 use crate::domain::{ContactBook, Message};
 use crate::link::{emit_sync_link, Credentials, Link};
 use crate::uplink::UplinkHandle;
+use crate::webhook::{self, HookEvent};
 use anyhow::Result;
 use imsg_proto::Envelope;
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::{broadcast, watch, RwLock};
+use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tracing::{info, warn};
 
 pub(crate) async fn run_generation(
@@ -173,7 +174,7 @@ async fn connect_and_sync_inner(
     handle: &UplinkHandle,
     link: &Arc<Link>,
     gen: u64,
-    mut wake: watch::Receiver<u64>,
+    wake: watch::Receiver<u64>,
 ) -> Result<()> {
     if *wake.borrow() != gen {
         return Ok(());
@@ -185,7 +186,7 @@ async fn connect_and_sync_inner(
     set_link_state(cache, true, true, "").await?;
     emit_sync_link(events, cache, &link.view().await).await;
 
-    let mut prefetch_ok = match prefetch_cache(&bb, creds, cache).await {
+    let prefetch_ok = match prefetch_cache(&bb, creds, cache).await {
         Ok(()) => true,
         Err(e) => {
             warn!("prefetch failed, staying connected: {e}");
@@ -193,10 +194,27 @@ async fn connect_and_sync_inner(
         }
     };
 
+    if creds.public.webhook_enabled {
+        live_webhook(bb, creds, cache, events, link, gen, wake, prefetch_ok).await
+    } else {
+        let _ = handle.webhook_clear_ours().await;
+        link.set_webhook_listening(false);
+        live_poll(bb, creds, cache, events, gen, wake, prefetch_ok).await
+    }
+}
+
+async fn live_poll(
+    bb: Arc<BlueBubbles>,
+    creds: &Credentials,
+    cache: &Arc<RwLock<MessageCache>>,
+    events: &broadcast::Sender<Envelope>,
+    gen: u64,
+    mut wake: watch::Receiver<u64>,
+    mut prefetch_ok: bool,
+) -> Result<()> {
     let mut sub = Arc::clone(&bb).subscribe();
     let mut retry = tokio::time::interval(std::time::Duration::from_secs(30));
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
     loop {
         if *wake.borrow() != gen {
             sub.pump.abort();
@@ -229,6 +247,104 @@ async fn connect_and_sync_inner(
         }
     }
     Ok(())
+}
+
+async fn live_webhook(
+    bb: Arc<BlueBubbles>,
+    creds: &Credentials,
+    cache: &Arc<RwLock<MessageCache>>,
+    events: &broadcast::Sender<Envelope>,
+    link: &Arc<Link>,
+    gen: u64,
+    mut wake: watch::Receiver<u64>,
+    mut prefetch_ok: bool,
+) -> Result<()> {
+    let token = crate::link::store::ensure_webhook_token(link.store_ctx())?;
+    let listener = match webhook::bind_local(creds.public.webhook_port).await {
+        Ok((listener, addr)) => {
+            info!("webhook listening on {addr}");
+            listener
+        }
+        Err(e) => {
+            warn!("webhook bind failed, falling back to poll: {e}");
+            link.set_webhook_listening(false);
+            set_link_state(cache, true, true, &format!("webhook bind failed: {e}")).await?;
+            emit_sync_link(events, cache, &link.view().await).await;
+            return live_poll(bb, creds, cache, events, gen, wake, prefetch_ok).await;
+        }
+    };
+    link.set_webhook_listening(true);
+    emit_sync_link(events, cache, &link.view().await).await;
+
+    if let Ok(msgs) = bb.recent_messages(40).await {
+        for msg in msgs {
+            apply_live(msg, &bb, creds, cache, events).await?;
+        }
+    }
+
+    let (tx, mut rx) = mpsc::channel::<HookEvent>(64);
+    let mut server = tokio::spawn(webhook::serve(
+        listener,
+        token.as_str().to_string(),
+        tx,
+    ));
+    let mut retry = tokio::time::interval(std::time::Duration::from_secs(30));
+    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    let result = loop {
+        if *wake.borrow() != gen {
+            server.abort();
+            break Ok(());
+        }
+        tokio::select! {
+            joined = &mut server => {
+                break joined.unwrap_or_else(|e| Err(e.into()));
+            }
+            ev = rx.recv() => {
+                let Some(ev) = ev else { break Ok(()) };
+                if let Err(e) = doorbell(&bb, creds, cache, events, ev).await {
+                    warn!("webhook doorbell: {e}");
+                }
+            }
+            _ = retry.tick() => {
+                if !prefetch_ok {
+                    match prefetch_cache(&bb, creds, cache).await {
+                        Ok(()) => prefetch_ok = true,
+                        Err(e) => warn!("prefetch retry failed: {e}"),
+                    }
+                }
+            }
+            _ = wait_new_gen(&mut wake, gen) => {
+                server.abort();
+                break Ok(());
+            }
+        }
+    };
+    link.set_webhook_listening(false);
+    result
+}
+
+async fn doorbell(
+    bb: &BlueBubbles,
+    creds: &Credentials,
+    cache: &Arc<RwLock<MessageCache>>,
+    events: &broadcast::Sender<Envelope>,
+    ev: HookEvent,
+) -> Result<()> {
+    let Some(guid) = ev.message_guid else {
+        return Ok(());
+    };
+    match bb.message_by_guid(&guid).await {
+        Ok(Some(msg)) => apply_live(msg, bb, creds, cache, events).await,
+        Ok(None) => {
+            warn!("webhook guid not on server");
+            Ok(())
+        }
+        Err(e) => {
+            warn!("webhook fetch failed: {e}");
+            Ok(())
+        }
+    }
 }
 
 fn sync_message_event(applied: Applied) -> Envelope {

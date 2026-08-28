@@ -49,6 +49,32 @@ impl UplinkHandle {
     pub async fn is_up(&self) -> bool {
         self.0.read().await.is_some()
     }
+
+    pub async fn webhook_replace(&self, url: &str) -> Result<(), UplinkError> {
+        let bb = self.0.read().await.clone().ok_or(UplinkError::LinkDown)?;
+        bb.webhook_replace(url).await
+    }
+
+    pub async fn webhook_clear_ours(&self) -> Result<(), UplinkError> {
+        let Some(bb) = self.0.read().await.clone() else {
+            return Ok(());
+        };
+        let listed = bb.webhook_list().await.unwrap_or_default();
+        for row in listed {
+            let existing = row.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            if !existing.contains("/imsg/hook") {
+                continue;
+            }
+            if let Some(id) = row
+                .get("guid")
+                .and_then(|g| g.as_str())
+                .or_else(|| row.get("id").and_then(|g| g.as_str()))
+            {
+                let _ = bb.webhook_delete(id).await;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

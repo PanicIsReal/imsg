@@ -1,7 +1,7 @@
 use super::secret::{self, SecretBackend};
 use super::{
     Credentials, Password, PasswordUpdate, Provision, PublicConfig, PublicView, SessionState,
-    SettingsDraft,
+    SettingsDraft, WebhookDraft,
 };
 use crate::config::{default_socket_path, ServerUrl};
 use anyhow::{bail, Context, Result};
@@ -49,6 +49,12 @@ struct PublicFile {
     prefetch_chats: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prefetch_messages: Option<u32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    webhook_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    webhook_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    webhook_serve_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +70,12 @@ struct FileIn {
     prefetch_chats: Option<u32>,
     #[serde(default)]
     prefetch_messages: Option<u32>,
+    #[serde(default)]
+    webhook_enabled: bool,
+    #[serde(default)]
+    webhook_port: Option<u16>,
+    #[serde(default)]
+    webhook_serve_url: Option<String>,
 }
 
 pub(crate) fn default_config_path() -> PathBuf {
@@ -89,6 +101,9 @@ impl PublicFile {
             socket_path: file.socket_path.clone(),
             prefetch_chats: file.prefetch_chats,
             prefetch_messages: file.prefetch_messages,
+            webhook_enabled: file.webhook_enabled,
+            webhook_port: file.webhook_port,
+            webhook_serve_url: file.webhook_serve_url.clone(),
         }
     }
 }
@@ -151,6 +166,9 @@ pub(crate) fn commit(ctx: &StoreCtx, draft: SettingsDraft) -> Result<PublicView>
             socket_path: None,
             prefetch_chats: None,
             prefetch_messages: None,
+            webhook_enabled: false,
+            webhook_port: None,
+            webhook_serve_url: None,
         }
     };
     public.server_url = draft.server.as_str().to_string();
@@ -164,11 +182,23 @@ pub(crate) fn view_from_provision(provision: &Provision) -> PublicView {
             server_url: None,
             password_set: false,
             session: SessionState::Unconfigured,
+            webhook_enabled: false,
+            webhook_port: crate::webhook::DEFAULT_PORT,
+            webhook_serve_url: String::new(),
+            webhook_listening: false,
+            webhook_registered: false,
+            webhook_token_set: false,
         },
         Provision::Ready(creds) => PublicView {
             server_url: Some(creds.public.server.as_str().to_string()),
             password_set: true,
             session: SessionState::Down,
+            webhook_enabled: creds.public.webhook_enabled,
+            webhook_port: creds.public.webhook_port,
+            webhook_serve_url: creds.public.webhook_serve_url.clone(),
+            webhook_listening: false,
+            webhook_registered: false,
+            webhook_token_set: false,
         },
     }
 }
@@ -204,7 +234,95 @@ fn public_from_file(ctx: &StoreCtx, server: ServerUrl, file: &FileIn) -> PublicC
             .unwrap_or_else(|| ctx.socket_path.clone()),
         prefetch_chats: file.prefetch_chats.unwrap_or(40),
         prefetch_messages: file.prefetch_messages.unwrap_or(100),
+        webhook_enabled: file.webhook_enabled,
+        webhook_port: file.webhook_port.unwrap_or(crate::webhook::DEFAULT_PORT),
+        webhook_serve_url: file.webhook_serve_url.clone().unwrap_or_default(),
     }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct WebhookSnap {
+    pub enabled: bool,
+    pub port: u16,
+    pub serve_url: String,
+}
+
+pub(crate) fn peek_webhook(ctx: &StoreCtx) -> Result<WebhookSnap> {
+    if !ctx.config_path.exists() {
+        return Ok(WebhookSnap {
+            enabled: false,
+            port: crate::webhook::DEFAULT_PORT,
+            serve_url: String::new(),
+        });
+    }
+    let text = std::fs::read_to_string(&ctx.config_path).context("read sync config")?;
+    let file: FileIn = toml::from_str(&text).context("parse sync config")?;
+    Ok(WebhookSnap {
+        enabled: file.webhook_enabled,
+        port: file.webhook_port.unwrap_or(crate::webhook::DEFAULT_PORT),
+        serve_url: file.webhook_serve_url.unwrap_or_default(),
+    })
+}
+
+pub(crate) fn webhook_token_set(ctx: &StoreCtx) -> Result<bool> {
+    Ok(secret::load_webhook(&ctx.secret)?.is_some())
+}
+
+pub(crate) fn ensure_webhook_token(ctx: &StoreCtx) -> Result<Password> {
+    if let Some(existing) = secret::load_webhook(&ctx.secret)? {
+        return Ok(existing);
+    }
+    let token = Password::new(crate::webhook::generate_token())?;
+    secret::store_webhook(&ctx.secret, &token)?;
+    Ok(token)
+}
+
+pub(crate) fn commit_webhook(ctx: &StoreCtx, draft: WebhookDraft) -> Result<PublicView> {
+    if draft.port == 0 {
+        bail!("webhook port must be non-zero");
+    }
+    let mut public = if ctx.config_path.exists() {
+        let text = std::fs::read_to_string(&ctx.config_path).context("read sync config")?;
+        let file: FileIn = toml::from_str(&text).context("parse sync config")?;
+        PublicFile::from_in(&file)
+    } else {
+        PublicFile {
+            server_url: String::new(),
+            cache_path: None,
+            socket_path: None,
+            prefetch_chats: None,
+            prefetch_messages: None,
+            webhook_enabled: false,
+            webhook_port: None,
+            webhook_serve_url: None,
+        }
+    };
+    public.webhook_enabled = draft.enabled;
+    public.webhook_port = Some(draft.port);
+    let serve = draft.serve_url.trim().to_string();
+    public.webhook_serve_url = if serve.is_empty() { None } else { Some(serve) };
+    if draft.enabled {
+        let _ = ensure_webhook_token(ctx)?;
+    }
+    write_public(&ctx.config_path, &public)?;
+    Ok(view_from_provision(&load(ctx)?))
+}
+
+pub(crate) fn rotate_webhook_token(ctx: &StoreCtx) -> Result<()> {
+    let token = Password::new(crate::webhook::generate_token())?;
+    secret::store_webhook(&ctx.secret, &token)?;
+    Ok(())
+}
+
+pub(crate) fn webhook_copy_url(ctx: &StoreCtx) -> Result<String> {
+    let snap = peek_webhook(ctx)?;
+    let origin = if snap.serve_url.trim().is_empty() {
+        crate::webhook::guess_serve_origin().unwrap_or_else(|| format!("http://127.0.0.1:{}", snap.port))
+    } else {
+        snap.serve_url
+    };
+    let token = ensure_webhook_token(ctx)?;
+    crate::webhook::hook_url(&origin, token.as_str())
 }
 
 fn write_public(path: &Path, file: &PublicFile) -> Result<()> {
@@ -224,6 +342,9 @@ mod tests {
             socket_path: None,
             prefetch_chats: Some(20),
             prefetch_messages: Some(50),
+            webhook_enabled: true,
+            webhook_port: Some(18792),
+            webhook_serve_url: Some("https://box.ts.net".into()),
         };
         let text = toml::to_string(&file).unwrap();
         assert!(
@@ -232,6 +353,10 @@ mod tests {
         );
         let parsed: toml::Value = toml::from_str(&text).unwrap();
         assert!(parsed.get("password").is_none());
+        assert!(
+            !text.contains("token"),
+            "public toml leaked a token: {text}"
+        );
     }
 
     #[test]
