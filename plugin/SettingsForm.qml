@@ -132,7 +132,7 @@ Column {
       ? (root.webhookListening
         ? (root.webhookRegistered ? "Listening. Registered with BlueBubbles. Poll is off." : "Listening. Register with BlueBubbles to receive events. Poll is off.")
         : "Enabled. Waiting for the listener.")
-      : "Off. Live mail uses a 2s poll."
+      : "Off. New iMessages use a 2s poll."
     color: root.dim
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption

@@ -43,7 +43,7 @@ Prefer the panel form so the password does not land in shell history.
 
 Settings can enable a localhost webhook. Run `tailscale serve --bg localhost:18792`
 on Linux, copy the URL, then Register once the Mac link is live. Restrict the
-Serve ACL to your Mac. Mail still comes from REST. Poll is off while the webhook
+Serve ACL to your Mac. Messages still come from REST. Poll is off while the webhook
 is on.
 
 ## Use
