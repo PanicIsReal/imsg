@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "js/Store.js" as Store
 
 Column {
   id: root
@@ -19,11 +20,20 @@ Column {
   property bool webhookListening: false
   property bool webhookRegistered: false
   property string webhookCopyUrl: ""
-  property bool helpOpen: false
+  property bool advancedOpen: false
+  property bool serveOffered: false
 
   readonly property bool editing: urlField.activeFocus || passwordField.activeFocus
   readonly property color dim: Qt.darker(foreground, 1.4)
   readonly property color actionFill: Qt.rgba(0, 0, 0, 0.35)
+  readonly property var webhookGuide: Store.webhookGuide({
+    enabled: root.webhookEnabled,
+    listening: root.webhookListening,
+    registered: root.webhookRegistered,
+    session: root.session,
+    serveOffered: root.serveOffered
+  })
+  readonly property bool webhookReady: root.webhookGuide.phase === "ready"
   readonly property string sessionCaption: {
     if (root.session === "live") return "Connected"
     if (root.session === "connecting") return "Connecting"
@@ -129,30 +139,27 @@ Column {
 
   Text {
     width: parent.width
-    text: root.webhookEnabled
-      ? (root.webhookListening
-        ? (root.webhookRegistered ? "Listening. Registered with BlueBubbles. Poll is off." : "Listening. Register with BlueBubbles to receive events. Poll is off.")
-        : "Enabled. Waiting for the listener.")
-      : "Off. New iMessages use a 2s poll."
+    visible: !root.webhookReady
+    text: "Step " + root.webhookGuide.step + " of " + root.webhookGuide.steps
     color: root.dim
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
-    wrapMode: Text.WordWrap
-  }
-
-  Button {
-    width: parent.width
-    text: root.helpOpen ? "Hide webhook help" : "Why a webhook?"
-    foreground: root.foreground
-    fontFamily: root.fontFamily
-    bordered: true
-    onClicked: root.helpOpen = !root.helpOpen
   }
 
   Text {
     width: parent.width
-    visible: root.helpOpen
-    text: "BlueBubbles pokes this machine. We then pull the real message with your password. Listen on localhost. Publish with tailscale serve, not Funnel. Restrict the Serve ACL to your Mac."
+    text: root.webhookGuide.title
+    color: root.webhookReady ? root.dim : root.foreground
+    font.family: root.fontFamily
+    font.pixelSize: root.webhookReady ? Style.font.caption : Style.font.body
+    font.bold: !root.webhookReady
+    wrapMode: Text.WordWrap
+  }
+
+  Text {
+    width: parent.width
+    visible: root.webhookGuide.body.length > 0
+    text: root.webhookGuide.body
     color: root.dim
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
@@ -162,6 +169,7 @@ Column {
   TextField {
     id: portField
     width: parent.width
+    visible: !root.webhookReady || root.advancedOpen
     foreground: root.foreground
     text: String(root.webhookPort)
     placeholderText: "Port (default 18792)"
@@ -171,6 +179,7 @@ Column {
   TextField {
     id: serveField
     width: parent.width
+    visible: !root.webhookReady || root.advancedOpen
     foreground: root.foreground
     text: root.webhookServeUrl
     placeholderText: "https://<linux>.<tailnet>.ts.net"
@@ -183,6 +192,9 @@ Column {
   onWebhookServeUrlChanged: {
     if (!serveField.activeFocus) serveField.text = root.webhookServeUrl
   }
+  onWebhookEnabledChanged: {
+    if (!root.webhookEnabled) root.serveOffered = false
+  }
 
   function webhookPortValue() {
     var port = parseInt(portField.text, 10)
@@ -190,39 +202,83 @@ Column {
     return port
   }
 
+  function persistWebhook(enabled) {
+    root.webhookSaveRequested(!!enabled, root.webhookPortValue(), serveField.text.trim())
+  }
+
+  function runWebhookStep() {
+    if (root.saving) return
+    var kind = root.webhookGuide.actionKind
+    if (kind === "enable") {
+      root.persistWebhook(true)
+      return
+    }
+    if (kind === "serve") {
+      var port = root.webhookPortValue()
+      root.persistWebhook(true)
+      root.webhookServeRequested(port)
+      root.serveOffered = true
+      return
+    }
+    if (kind === "register") {
+      root.webhookRegisterRequested()
+      return
+    }
+    if (kind === "reconnect") root.reconnectRequested()
+  }
+
   Button {
     width: parent.width
-    text: "Publish with Tailscale"
+    visible: root.webhookGuide.actionKind !== ""
+    text: root.saving ? "Working…" : root.webhookGuide.actionLabel
     foreground: root.foreground
     fontFamily: root.fontFamily
     bordered: true
     background: root.actionFill
     enabled: !root.saving
     opacity: enabled ? 1 : 0.4
-    onClicked: {
-      var port = root.webhookPortValue()
-      root.webhookSaveRequested(root.webhookEnabled, port, serveField.text.trim())
-      root.webhookServeRequested(port)
-    }
+    onClicked: root.runWebhookStep()
   }
 
   Toggle {
     width: parent.width
+    visible: root.webhookReady
     label: "Toggle"
-    description: "Enable webhook"
+    description: "Webhook on. Poll is off."
     checked: root.webhookEnabled
     foreground: root.foreground
     fontFamily: root.fontFamily
     opacity: root.saving ? 0.55 : 1
     onClicked: {
       if (root.saving) return
-      root.webhookSaveRequested(!root.webhookEnabled, root.webhookPortValue(), serveField.text.trim())
+      root.persistWebhook(!root.webhookEnabled)
     }
+  }
+
+  Button {
+    width: parent.width
+    visible: root.webhookEnabled && !root.webhookReady
+    text: "Turn off"
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    bordered: true
+    enabled: !root.saving
+    onClicked: root.persistWebhook(false)
+  }
+
+  Button {
+    width: parent.width
+    text: root.advancedOpen ? "Hide advanced" : "Advanced"
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    bordered: true
+    onClicked: root.advancedOpen = !root.advancedOpen
   }
 
   Grid {
     id: hookActions
     width: parent.width
+    visible: root.advancedOpen
     columns: 2
     columnSpacing: Style.space(8)
     rowSpacing: Style.space(8)
@@ -238,20 +294,7 @@ Column {
       background: root.actionFill
       enabled: !root.saving
       opacity: enabled ? 1 : 0.4
-      onClicked: root.webhookSaveRequested(root.webhookEnabled, root.webhookPortValue(), serveField.text.trim())
-    }
-
-    Button {
-      width: hookActions.cellW
-      text: "Register webhook"
-      foreground: root.foreground
-      fontFamily: root.fontFamily
-      bordered: true
-      background: root.actionFill
-      enabled: !root.saving && root.session === "live" && root.webhookEnabled
-      opacity: enabled ? 1 : 0.4
-      tooltipText: root.session === "live" ? "Create the webhook on BlueBubbles" : "Connect to BlueBubbles first"
-      onClicked: root.webhookRegisterRequested()
+      onClicked: root.persistWebhook(root.webhookEnabled)
     }
 
     Button {
@@ -277,11 +320,28 @@ Column {
       opacity: enabled ? 1 : 0.4
       onClicked: root.webhookRotateRequested()
     }
+
+    Button {
+      width: hookActions.cellW
+      text: "Publish with Tailscale"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      bordered: true
+      background: root.actionFill
+      enabled: !root.saving
+      opacity: enabled ? 1 : 0.4
+      onClicked: {
+        var port = root.webhookPortValue()
+        root.persistWebhook(root.webhookEnabled)
+        root.webhookServeRequested(port)
+        root.serveOffered = true
+      }
+    }
   }
 
   TextEdit {
     width: parent.width
-    visible: root.webhookCopyUrl.length > 0
+    visible: root.advancedOpen && root.webhookCopyUrl.length > 0
     text: root.webhookCopyUrl
     color: root.dim
     readOnly: true

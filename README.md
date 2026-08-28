@@ -76,20 +76,19 @@ New iMessages default to a 2s REST poll. Settings can switch to a webhook doorbe
 The POST is only a poke. imsg-sync then pulls the real message over REST with the
 password. Poll is off while the webhook is on.
 
-1. In Settings, set the Serve URL (MagicDNS HTTPS origin for this Linux box).
-2. Pick a port if 18792 is taken. Enable webhook.
-3. On Linux, click **Publish with Tailscale** in Settings. That opens the
-same floating Omarchy window as install, and runs `tailscale serve` for the
-port in the form. Do not use Funnel. To do it by hand:
+Settings walks you through three steps. Turn on the webhook, publish with
+Tailscale, then register with BlueBubbles. Register is the step that is easy
+to skip. Incoming pokes do not start until it is done.
+
+The Tailscale step opens the same floating Omarchy window as install. It runs
+`tailscale serve` for the port in the form. Not Funnel. To do it by hand:
 
 ```sh
 tailscale serve --bg localhost:18792
 ```
 
-4. Copy the webhook URL. Treat the token like a password.
-5. Connect to BlueBubbles, then click Register webhook.
-
-Restrict the Linux Serve ACL to your Mac.
+Restrict the Linux Serve ACL to your Mac. Treat the webhook URL token like a
+password.
 
 ## Use
 

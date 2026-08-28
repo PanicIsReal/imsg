@@ -123,4 +123,54 @@ assert.equal(launch.startsWith("omarchy-launch-floating-terminal-with-presentati
 assert.equal(launch.includes("funnel"), false)
 assert.equal(launch.includes("localhost:18792"), true)
 
+function guidePhase(input) {
+  return Store.webhookGuide(input).phase
+}
+
+assert.equal(guidePhase({}), "needs-enable")
+assert.equal(Store.webhookGuide({}).actionKind, "enable")
+assert.equal(Store.webhookGuide({ enabled: true }).phase, "waiting")
+assert.equal(
+  guidePhase({ enabled: true, listening: true }),
+  "needs-serve",
+)
+assert.equal(
+  Store.webhookGuide({ enabled: true, listening: true }).actionKind,
+  "serve",
+)
+assert.equal(
+  guidePhase({ enabled: true, listening: true, serveOffered: true, session: "down" }),
+  "needs-live",
+)
+assert.equal(
+  Store.webhookGuide({
+    enabled: true,
+    listening: true,
+    serveOffered: true,
+    session: "live",
+  }).actionKind,
+  "register",
+)
+assert.equal(
+  guidePhase({
+    enabled: true,
+    listening: true,
+    registered: true,
+    session: "live",
+  }),
+  "ready",
+)
+assert.equal(
+  Store.webhookGuide({
+    enabled: true,
+    listening: true,
+    registered: true,
+  }).actionKind,
+  "",
+)
+assert.notEqual(
+  Store.webhookGuide({ enabled: true, listening: true }).actionKind,
+  "register",
+)
+
 console.log("plugin-status.test.mjs ok")

@@ -189,3 +189,77 @@ function setupGuide(s) {
     actionKind: "settings"
   }
 }
+
+function webhookGuide(s) {
+  s = s || {}
+  var enabled = !!s.enabled
+  var listening = !!s.listening
+  var registered = !!s.registered
+  var live = s.session === "live"
+  var serveOffered = !!s.serveOffered
+
+  if (enabled && listening && registered) {
+    return {
+      phase: "ready",
+      step: 3,
+      steps: 3,
+      title: "Listening. Registered with BlueBubbles. Poll is off.",
+      body: "",
+      actionKind: "",
+      actionLabel: ""
+    }
+  }
+  if (!enabled) {
+    return {
+      phase: "needs-enable",
+      step: 1,
+      steps: 3,
+      title: "Turn on the webhook",
+      body: "BlueBubbles pokes this machine. We then pull the real iMessage with your password. Poll turns off.",
+      actionKind: "enable",
+      actionLabel: "Turn on webhook"
+    }
+  }
+  if (!listening) {
+    return {
+      phase: "waiting",
+      step: 1,
+      steps: 3,
+      title: "Starting the listener",
+      body: "Hang on a second.",
+      actionKind: "",
+      actionLabel: ""
+    }
+  }
+  if (!serveOffered) {
+    return {
+      phase: "needs-serve",
+      step: 2,
+      steps: 3,
+      title: "Publish on Tailscale",
+      body: "Opens the Omarchy window and publishes localhost on your tailnet. Not Funnel. Restrict the Serve ACL to your Mac.",
+      actionKind: "serve",
+      actionLabel: "Publish with Tailscale"
+    }
+  }
+  if (!live) {
+    return {
+      phase: "needs-live",
+      step: 3,
+      steps: 3,
+      title: "Connect BlueBubbles first",
+      body: "Register needs a live Mac link. Save the URL and password above, then come back.",
+      actionKind: "reconnect",
+      actionLabel: "Reconnect"
+    }
+  }
+  return {
+    phase: "needs-register",
+    step: 3,
+    steps: 3,
+    title: "Register with BlueBubbles",
+    body: "BlueBubbles will not poke this machine until you register.",
+    actionKind: "register",
+    actionLabel: "Register webhook"
+  }
+}
