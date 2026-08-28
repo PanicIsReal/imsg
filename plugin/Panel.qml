@@ -306,10 +306,22 @@ Panel {
           foreground: root.fg
           fontFamily: root.family
           lastError: imsg ? imsg.lastError : ""
+          webhookEnabled: !!(imsg && imsg.settings && imsg.settings.webhook_enabled)
+          webhookPort: imsg && imsg.settings && imsg.settings.webhook_port ? Number(imsg.settings.webhook_port) : 18792
+          webhookServeUrl: imsg && imsg.settings && imsg.settings.webhook_serve_url ? String(imsg.settings.webhook_serve_url) : ""
+          webhookListening: !!(imsg && imsg.settings && imsg.settings.webhook_listening)
+          webhookRegistered: !!(imsg && imsg.settings && imsg.settings.webhook_registered)
+          webhookCopyUrl: imsg ? String(imsg.webhookCopyUrl || "") : ""
           onSaveRequested: function (url, password) {
             if (imsg) imsg.saveSettings(url, password)
           }
           onReconnectRequested: if (imsg) imsg.reconnect()
+          onWebhookSaveRequested: function (enabled, port, serveUrl) {
+            if (imsg) imsg.saveWebhook(enabled, port, serveUrl)
+          }
+          onWebhookRegisterRequested: if (imsg) imsg.registerWebhook()
+          onWebhookRotateRequested: if (imsg) imsg.rotateWebhookToken()
+          onWebhookCopyRequested: if (imsg) imsg.loadWebhookUrl()
         }
 
         Column {

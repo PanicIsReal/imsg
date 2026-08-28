@@ -19,7 +19,13 @@ function settingsFrom(result) {
   return {
     server_url: (result && result.server_url) ? String(result.server_url) : "",
     password_set: !!(result && result.password_set),
-    session: (result && result.session) ? String(result.session) : "unconfigured"
+    session: (result && result.session) ? String(result.session) : "unconfigured",
+    webhook_enabled: !!(result && result.webhook_enabled),
+    webhook_port: result && result.webhook_port ? Number(result.webhook_port) : 18792,
+    webhook_serve_url: (result && result.webhook_serve_url) ? String(result.webhook_serve_url) : "",
+    webhook_listening: !!(result && result.webhook_listening),
+    webhook_registered: !!(result && result.webhook_registered),
+    webhook_token_set: !!(result && result.webhook_token_set)
   }
 }
 

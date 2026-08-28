@@ -25,9 +25,16 @@ Item {
   property var settings: ({
     server_url: "",
     password_set: false,
-    session: "unconfigured"
+    session: "unconfigured",
+    webhook_enabled: false,
+    webhook_port: 18792,
+    webhook_serve_url: "",
+    webhook_listening: false,
+    webhook_registered: false,
+    webhook_token_set: false
   })
   property bool settingsSaving: false
+  property string webhookCopyUrl: ""
 
   readonly property var displayMessages: {
     var hist = root.messages || []
@@ -113,11 +120,7 @@ Item {
       }
     }
     if (patch.settings !== undefined) {
-      root.settings = {
-        server_url: patch.settings.server_url ? String(patch.settings.server_url) : "",
-        password_set: !!patch.settings.password_set,
-        session: patch.settings.session ? String(patch.settings.session) : "unconfigured"
-      }
+      root.applySettingsResult(patch.settings)
     }
     if (patch.notify) {
       root.notifyInbound(patch.notify.sender, patch.notify.preview, patch.notify.chatId)
@@ -282,6 +285,50 @@ Item {
     startRequest(settingsProc, "config.reconnect", {})
   }
 
+  function applySettingsResult(result) {
+    if (!result) return
+    var next = Store.settingsFrom(result)
+    root.settings = {
+      server_url: next.server_url || root.settings.server_url,
+      password_set: next.password_set,
+      session: next.session || root.settings.session,
+      webhook_enabled: !!next.webhook_enabled,
+      webhook_port: next.webhook_port || root.settings.webhook_port || 18792,
+      webhook_serve_url: next.webhook_serve_url,
+      webhook_listening: !!next.webhook_listening,
+      webhook_registered: !!next.webhook_registered,
+      webhook_token_set: !!next.webhook_token_set
+    }
+  }
+
+  function saveWebhook(enabled, port, serveUrl) {
+    if (requestScript === "" || settingsProc.running) return
+    settingsSaving = true
+    startRequest(settingsProc, "webhook.set", {
+      enabled: !!enabled,
+      port: Number(port) || 18792,
+      serve_url: String(serveUrl || "")
+    })
+  }
+
+  function registerWebhook() {
+    if (requestScript === "" || settingsProc.running) return
+    settingsSaving = true
+    startRequest(settingsProc, "webhook.register", {})
+  }
+
+  function rotateWebhookToken() {
+    if (requestScript === "" || settingsProc.running) return
+    settingsSaving = true
+    webhookCopyUrl = ""
+    startRequest(settingsProc, "webhook.rotate", {})
+  }
+
+  function loadWebhookUrl() {
+    if (requestScript === "" || webhookUrlProc.running) return
+    startRequest(webhookUrlProc, "webhook.url", {})
+  }
+
   function notifyInbound(sender, body, chatId) {
     var cmd = ImsgClient.notificationCommand(sender, body, chatId)
     if (notifyProc.running) {
@@ -403,11 +450,7 @@ Item {
           root.lastError = ImsgClient.friendlyError(res.result.last_error)
           root.statusKnown = true
           if (res.result.contacts) root.contacts = String(res.result.contacts)
-          root.settings = {
-            server_url: res.result.server_url ? String(res.result.server_url) : "",
-            password_set: !!res.result.password_set,
-            session: res.result.session ? String(res.result.session) : "unconfigured"
-          }
+          root.applySettingsResult(res.result)
         }
       }
     }
@@ -532,11 +575,7 @@ Item {
       onStreamFinished: {
         var res = ImsgClient.parseResponse(text)
         if (res && res.ok && res.result) {
-          root.settings = {
-            server_url: res.result.server_url ? String(res.result.server_url) : root.settings.server_url,
-            password_set: res.result.password_set !== undefined ? !!res.result.password_set : root.settings.password_set,
-            session: res.result.session ? String(res.result.session) : root.settings.session
-          }
+          root.applySettingsResult(res.result)
           root.connected = true
           if (res.result.last_error !== undefined) {
             root.lastError = ImsgClient.friendlyError(res.result.last_error)
@@ -548,6 +587,27 @@ Item {
     }
     onExited: function() {
       root.settingsSaving = false
+    }
+  }
+
+  Process {
+    id: webhookUrlProc
+    running: false
+    command: []
+    property string payload: ""
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var res = ImsgClient.parseResponse(text)
+        if (res && res.ok && res.result && res.result.url) {
+          root.webhookCopyUrl = String(res.result.url)
+        }
+      }
     }
   }
 
