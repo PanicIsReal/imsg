@@ -149,7 +149,7 @@ Column {
   Text {
     width: parent.width
     visible: root.helpOpen
-    text: "A webhook is a doorbell, not a mailbox. BlueBubbles pokes this machine. imsg-sync then pulls the real message over REST with your password. Bind is localhost only. Run tailscale serve --bg localhost:<port> on Linux. Do not use Funnel. Prefer a Tailscale ACL so only macmini can hit this Serve. Port 9443 is the Mac BlueBubbles Serve. It is not this listener."
+    text: "BlueBubbles pokes this machine. We then pull the real message with your password. Listen on localhost. Publish with tailscale serve, not Funnel. Restrict the Serve ACL to your Mac."
     color: root.dim
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption

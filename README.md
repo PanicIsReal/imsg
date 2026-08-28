@@ -87,8 +87,7 @@ tailscale serve --bg localhost:18792
 4. Copy the webhook URL. Treat the token like a password.
 5. Connect to BlueBubbles, then click Register webhook.
 
-Prefer a Tailscale ACL that allows only `macmini` to this machine's Serve port.
-9443 is the Mac BlueBubbles Serve. It is not this listener.
+Restrict the Linux Serve ACL to your Mac.
 
 ## Use
 
