@@ -28,18 +28,16 @@ function streamCommand(script) {
 }
 
 function notificationCommand(sender, body, chatId) {
+  // Typed D-Bus arguments keep message text (including "--exec") as data.
+  var action = ["omarchy-shell", "io.github.panic.imessage", "openChat", String(chatId || "0")]
+  var preview = String(body || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   return [
-    "omarchy-notification-send",
-    "--app-name", "iMessage",
-    "--urgency", "normal",
-    "-g", "󰍩",
-    String(sender || "iMessage"),
-    String(body || ""),
-    "--exec",
-    "omarchy-shell",
-    "io.github.panic.imessage",
-    "openChat",
-    String(chatId || "0")
+    "busctl", "--user", "--", "call",
+    "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+    "org.freedesktop.Notifications", "Notify", "susssasa{sv}i",
+    "iMessage", "0", "", String(sender || "iMessage"), preview,
+    "0", "3", "urgency", "y", "1", "omarchy-glyph", "s", "󰍩",
+    "omarchy-exec-argv", "s", JSON.stringify(action), "-1"
   ]
 }
 

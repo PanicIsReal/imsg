@@ -11,6 +11,42 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tracing::{info, warn};
 
+const RETRY_MIN: std::time::Duration = std::time::Duration::from_millis(250);
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
+struct RetryBackoff {
+    failures: u32,
+    entropy: u64,
+}
+
+impl RetryBackoff {
+    fn new() -> Self {
+        let entropy = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        Self {
+            failures: 0,
+            entropy,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.failures = 0;
+    }
+
+    fn next_delay(&mut self) -> std::time::Duration {
+        let shift = self.failures.min(7);
+        let base = RETRY_MIN.saturating_mul(1 << shift).min(RETRY_MAX);
+        self.failures = self.failures.saturating_add(1);
+        self.entropy ^= self.entropy << 13;
+        self.entropy ^= self.entropy >> 7;
+        self.entropy ^= self.entropy << 17;
+        let jitter = base / 4 * (self.entropy % 5) as u32 / 4;
+        (base + jitter).min(RETRY_MAX)
+    }
+}
+
 pub(crate) async fn run_generation(
     link: Arc<Link>,
     creds: Credentials,
@@ -20,31 +56,37 @@ pub(crate) async fn run_generation(
     mut wake: watch::Receiver<u64>,
 ) {
     let handle = link.uplink();
+    let mut retry = RetryBackoff::new();
     loop {
         if *wake.borrow() != gen {
             return;
         }
         link.set_connecting(true);
         emit_sync_link(&events, &cache, &link.view().await).await;
-        tokio::select! {
-            result = connect_and_sync(&creds, &cache, &events, &handle, &link, gen, wake.clone()) => {
-                match result {
-                    Ok(()) => warn!("bluebubbles connection closed, reconnecting"),
-                    Err(e) => warn!("bluebubbles error: {e}, retry in 5s"),
-                }
-            }
-            _ = wait_new_gen(&mut wake, gen) => {
-                handle.detach().await;
-                return;
-            }
+        match connect_and_sync(
+            &creds,
+            &cache,
+            &events,
+            &handle,
+            &link,
+            gen,
+            wake.clone(),
+            &mut retry,
+        )
+        .await
+        {
+            Ok(()) => warn!("bluebubbles connection closed, reconnecting"),
+            Err(e) => warn!("bluebubbles error: {e}"),
         }
         if *wake.borrow() != gen {
             return;
         }
         link.set_connecting(false);
         emit_sync_link(&events, &cache, &link.view().await).await;
+        let delay = retry.next_delay();
+        warn!("retrying BlueBubbles in {}ms", delay.as_millis());
         tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+            _ = tokio::time::sleep(delay) => {}
             _ = wait_new_gen(&mut wake, gen) => return,
         }
     }
@@ -69,11 +111,13 @@ async fn connect_and_sync(
     link: &Arc<Link>,
     gen: u64,
     mut wake: watch::Receiver<u64>,
+    retry: &mut RetryBackoff,
 ) -> Result<()> {
     let result = tokio::select! {
-        r = connect_and_sync_inner(creds, cache, events, handle, link, gen, wake.clone()) => r,
+        r = connect_and_sync_inner(creds, cache, events, handle, link, gen, wake.clone(), retry) => r,
         _ = wait_new_gen(&mut wake, gen) => Ok(()),
     };
+    link.set_webhook_listening(false);
     handle.detach().await;
     let _ = set_link_state(cache, false, false, &last_error(&result)).await;
     emit_sync_link(events, cache, &link.view().await).await;
@@ -175,11 +219,13 @@ async fn connect_and_sync_inner(
     link: &Arc<Link>,
     gen: u64,
     wake: watch::Receiver<u64>,
+    retry: &mut RetryBackoff,
 ) -> Result<()> {
     if *wake.borrow() != gen {
         return Ok(());
     }
     let bb = BlueBubbles::connect(creds.clone()).await?;
+    retry.reset();
     info!("connected to BlueBubbles");
     handle.attach(Arc::clone(&bb)).await;
     link.set_connecting(false);
@@ -276,18 +322,11 @@ async fn live_webhook(
     link.set_webhook_listening(true);
     emit_sync_link(events, cache, &link.view().await).await;
 
-    if let Ok(msgs) = bb.recent_messages(40).await {
-        for msg in msgs {
-            apply_live(msg, &bb, creds, cache, events).await?;
-        }
-    }
-
     let (tx, mut rx) = mpsc::channel::<HookEvent>(64);
-    let mut server = tokio::spawn(webhook::serve(
-        listener,
-        token.as_str().to_string(),
-        tx,
-    ));
+    let mut server = tokio::spawn(webhook::serve(listener, token.as_str().to_string(), tx));
+    let _server_guard = crate::bb::AbortTask(server.abort_handle());
+    // Webhooks provide low latency; reconciliation recovers dropped deliveries.
+    let mut recovery = Arc::clone(&bb).subscribe_every(std::time::Duration::from_secs(30));
     let mut retry = tokio::time::interval(std::time::Duration::from_secs(30));
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -299,6 +338,16 @@ async fn live_webhook(
         tokio::select! {
             joined = &mut server => {
                 break joined.unwrap_or_else(|e| Err(e.into()));
+            }
+            result = &mut recovery.pump => {
+                break match result {
+                    Ok(result) => result,
+                    Err(e) => Err(e.into()),
+                };
+            }
+            msg = recovery.events.recv() => {
+                let Some(msg) = msg else { break Ok(()) };
+                apply_live(msg, &bb, creds, cache, events).await?;
             }
             ev = rx.recv() => {
                 let Some(ev) = ev else { break Ok(()) };
@@ -340,10 +389,7 @@ async fn doorbell(
             warn!("webhook guid not on server");
             Ok(())
         }
-        Err(e) => {
-            warn!("webhook fetch failed: {e}");
-            Ok(())
-        }
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -407,4 +453,29 @@ async fn apply_live(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_backoff_starts_fast_caps_and_resets() {
+        let mut retry = RetryBackoff {
+            failures: 0,
+            entropy: 1,
+        };
+        let first = retry.next_delay();
+        assert!(first >= RETRY_MIN);
+        assert!(first <= RETRY_MIN + RETRY_MIN / 4);
+
+        for _ in 0..32 {
+            assert!(retry.next_delay() <= RETRY_MAX);
+        }
+
+        retry.reset();
+        let after_reset = retry.next_delay();
+        assert!(after_reset >= RETRY_MIN);
+        assert!(after_reset <= RETRY_MIN + RETRY_MIN / 4);
+    }
 }

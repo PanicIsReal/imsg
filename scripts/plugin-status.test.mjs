@@ -188,3 +188,57 @@ assert.notEqual(
 )
 
 console.log("plugin-status.test.mjs ok")
+
+// Exercise the shipped QML functions with mocked Process objects.
+const serviceSource = fs.readFileSync(path.join(pluginRoot, "Service.qml"), "utf8")
+const panelSource = fs.readFileSync(path.join(pluginRoot, "Panel.qml"), "utf8")
+function qmlFunction(source, name, context) {
+  const match = source.match(new RegExp("  function " + name + "\\(([^)]*)\\) \\{([\\s\\S]*?)\\n  \\}"))
+  assert.ok(match, name + " exists")
+  vm.createContext(context)
+  return vm.runInContext("(function(" + match[1] + ") {" + match[2] + "})", context)
+}
+const mockRoot = { pendingNotify: [], openChatId: "B" }
+const mockHistory = { running: true, beforeCursor: "original", chatId: "A" }
+const load = qmlFunction(serviceSource, "loadMessages", {
+  root: mockRoot, historyProc: mockHistory, startRequest() { return true }
+})
+load("B", null)
+assert.equal(mockHistory.chatId, "A", "in-flight history retains its chat")
+assert.equal(mockHistory.beforeCursor, "original", "in-flight cursor is immutable")
+assert.equal(mockHistory.pendingRequest.chat_id, "B", "latest requested chat is queued")
+mockHistory.running = false
+load("B", null)
+assert.equal(mockHistory.chatId, "B")
+const notify = qmlFunction(serviceSource, "notifyInbound", {
+  root: mockRoot, notifyProc: { running: true }, ImsgClient: Client
+})
+notify("Ada", "one", "1")
+notify("Ada", "two", "1")
+assert.equal(mockRoot.pendingNotify.length, 2, "bursts retain every pending alert")
+const active = { imsg: { openChatId: "A", markRead() { throw Error("hidden chat marked read") } },
+  opened: false, settingsVisible: false, selectedChatId: "A" }
+qmlFunction(panelSource, "updateActiveChat", active)()
+assert.equal(active.imsg.openChatId, "", "closed panel does not suppress notifications")
+active.opened = true
+active.settingsVisible = true
+qmlFunction(panelSource, "updateActiveChat", active)()
+assert.equal(active.imsg.openChatId, "", "settings does not suppress notifications")
+const merged = Store.mergeMessages(
+  [{id: "2", created_at: "2026-01-02", text: "old"}],
+  [{id: "1", created_at: "2026-01-01"}, {id: "2", created_at: "2026-01-02", text: "new"}])
+assert.equal(merged.length, 2)
+assert.equal(merged[0].id, "1", "late events are ordered chronologically")
+assert.equal(merged[1].text, "new", "newer live payload wins over stale history")
+assert.equal(Store.applyMessage({openChatId: "", chats: []}, {
+  is_new: true, message: {id: "9", chat_id: "A", is_from_me: false, attachments: [{}]}
+}).notify.preview, "Attachment")
+console.log("plugin realtime regression tests ok")
+
+const malicious = Client.notificationCommand("--app-name", "--exec", "42")
+assert.equal(malicious[0], "busctl")
+assert.equal(malicious[12], "--app-name", "sender stays a typed string")
+assert.equal(malicious[13], "--exec", "body stays a typed string")
+assert.deepEqual(JSON.parse(malicious[24]), ["omarchy-shell", "io.github.panic.imessage", "openChat", "42"])
+assert.equal(Client.notificationCommand("Ada", "<b>hi</b>", "42")[13], "&lt;b&gt;hi&lt;/b&gt;")
+console.log("notification argument regression tests ok")

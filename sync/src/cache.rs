@@ -277,8 +277,10 @@ impl MessageCache {
             .await?
             .is_some();
         if !exists {
-            self.upsert_domain_chat(&crate::domain::Chat::stub_from_message(msg))
-                .await?;
+            let mut stub = crate::domain::Chat::stub_from_message(msg);
+            // apply_live_message increments unread exactly once below.
+            stub.unread_count = 0;
+            self.upsert_domain_chat(&stub).await?;
         }
         let id = self.id_for_guid(msg.guid.as_str()).await?;
         let mut json = msg.to_cache_json(id, chat_id);
@@ -687,6 +689,21 @@ fn later_timestamp(existing: Option<&str>, incoming: Option<&str>) -> Option<Str
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn realtime_first_message_counts_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = super::MessageCache::open(&dir.path().join("cache.db")).await.unwrap();
+        let msg = crate::domain::Message::from_bb(&serde_json::json!({
+            "guid": "first", "chatGuid": "iMessage;-;+1", "text": "hi",
+            "dateCreated": 1700000000000i64, "isFromMe": false
+        }), None).unwrap();
+        let applied = cache.apply_domain_message(&msg).await.unwrap();
+        assert!(applied.is_new);
+        assert_eq!(cache.list_chats(10).await.unwrap()[0]["unread_count"], 1);
+        assert!(!cache.apply_domain_message(&msg).await.unwrap().is_new);
+        assert_eq!(cache.list_chats(10).await.unwrap()[0]["unread_count"], 1);
+    }
+
     use super::*;
     use tempfile::tempdir;
 

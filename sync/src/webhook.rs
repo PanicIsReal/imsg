@@ -171,11 +171,10 @@ async fn handle_hook(
     } else {
         None
     };
-    let _ = state.events.try_send(HookEvent {
-        kind,
-        message_guid: guid,
-    });
-    StatusCode::NO_CONTENT
+    match state.events.try_send(HookEvent { kind, message_guid: guid }) {
+        Ok(()) => StatusCode::NO_CONTENT,
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 async fn rate_ok(hits: &Mutex<(Instant, u32)>) -> bool {
@@ -192,6 +191,12 @@ async fn rate_ok(hits: &Mutex<(Instant, u32)>) -> bool {
     true
 }
 
+#[cfg(test)]
+pub fn guess_serve_origin() -> Option<String> {
+    None
+}
+
+#[cfg(not(test))]
 pub fn guess_serve_origin() -> Option<String> {
     let out = std::process::Command::new("tailscale")
         .args(["status", "--json"])
@@ -215,6 +220,25 @@ pub fn guess_serve_origin() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn realtime_full_queue_returns_unavailable() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(super::HookEvent { kind: "new-message".into(), message_guid: None }).unwrap();
+        let state = super::HookState {
+            token: "secret".into(), events: tx,
+            hits: std::sync::Arc::new(tokio::sync::Mutex::new((std::time::Instant::now(), 0))),
+        };
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        let response = super::handle_hook(
+            axum::extract::State(state), axum::http::Method::POST,
+            axum::extract::Query(super::TokenQuery { token: Some("secret".into()) }),
+            headers, axum::body::Bytes::from_static(br#"{"type":"new-message","data":{"guid":"m"}}"#),
+        ).await;
+        use axum::response::IntoResponse;
+        assert_eq!(response.into_response().status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     use super::*;
     use serde_json::json;
 

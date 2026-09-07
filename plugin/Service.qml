@@ -21,7 +21,7 @@ Item {
   property string lastError: ""
   property string sendError: ""
   property string contacts: "unknown"
-  property var pendingNotify: null
+  property var pendingNotify: []
   property var settings: ({
     server_url: "",
     password_set: false,
@@ -36,6 +36,7 @@ Item {
   property bool settingsSaving: false
   property string webhookCopyUrl: ""
   property bool serveActive: false
+  property int sendSequence: 0
 
   readonly property var displayMessages: {
     var hist = root.messages || []
@@ -98,9 +99,16 @@ Item {
       return
     }
     if (frame.type === "event") {
+      if (historyProc.running && frame.topic === "sync.message" && frame.payload && frame.payload.message && String(frame.payload.message.chat_id) === historyProc.chatId) {
+        historyProc.liveMessages = Store.appendMessage(historyProc.liveMessages, frame.payload.message)
+      }
+      if (frame.topic === "sync.chats" && frame.payload && frame.payload.reason === "events_lagged" && root.openChatId) {
+        root.loadMessages(root.openChatId, null)
+      }
       applyPatch(Store.applyEvent({
         chats: root.chats,
         messages: root.messages,
+        outgoing: root.outgoing,
         openChatId: root.openChatId
       }, frame))
     }
@@ -108,9 +116,10 @@ Item {
 
   function applyPatch(patch) {
     if (!patch) return
+    if (patch.unreadCount !== undefined) root.unreadCount = patch.unreadCount
     if (patch.chats !== undefined) root.chats = patch.chats
     if (patch.messages !== undefined) root.messages = patch.messages
-    if (patch.unreadCount !== undefined) root.unreadCount = patch.unreadCount
+    if (patch.outgoing !== undefined) root.outgoing = patch.outgoing
     if (patch.link !== undefined) {
       root.bridgeConnected = ImsgClient.flag(patch.link.bridge_connected)
       root.databaseReady = ImsgClient.flag(patch.link.database_ready)
@@ -177,7 +186,13 @@ Item {
     if (!chatId) return
     var params = { chat_id: chatId, limit: 200 }
     if (before) params.before = before
+    if (historyProc.running) {
+      historyProc.pendingRequest = params
+      return
+    }
+    historyProc.chatId = String(chatId)
     historyProc.beforeCursor = before || ""
+    historyProc.liveMessages = []
     startRequest(historyProc, "messages.history", params)
   }
 
@@ -187,65 +202,64 @@ Item {
   }
 
   function addOutgoing(row) {
-    root.outgoing = root.outgoing.concat([row])
+    root.outgoing = Store.enqueueOutgoing(root.outgoing, row)
   }
 
-  function finishOutgoing(id, ok) {
-    var next = []
-    for (var i = 0; i < root.outgoing.length; i++) {
-      var o = root.outgoing[i]
-      if (String(o.id) === String(id)) {
-        if (ok) continue
-        next.push({
-          id: o.id,
-          chat_id: o.chat_id,
-          text: o.text,
-          is_from_me: true,
-          send_state: "failed",
-          created_at: o.created_at,
-          local_path: o.local_path || "",
-          attachments: o.attachments || []
-        })
-      } else if (o.send_state !== "sent") {
-        next.push(o)
-      }
+  function nextOutgoingId() {
+    root.sendSequence += 1
+    return "pending-" + Date.now() + "-" + root.sendSequence
+  }
+
+  function retryMessage(id) {
+    root.outgoing = Store.retryOutgoing(root.outgoing, id, root.nextOutgoingId(), new Date().toISOString())
+    root.drainOutgoing()
+  }
+
+  function drainOutgoing() {
+    if (requestScript === "" || sendProc.running) return
+    var row = Store.nextQueuedOutgoing(root.outgoing)
+    if (!row) {
+      root.sending = false
+      return
     }
-    root.outgoing = next
+    root.outgoing = Store.updateOutgoing(root.outgoing, row.id, "sending", "")
+    sendProc.chatId = String(row.chat_id)
+    sendProc.outgoingId = String(row.id)
+    sendProc.restoreText = String(row.text || "")
+    sendProc.response = null
+    var method = row.local_path ? "messages.send_attachment" : "messages.send"
+    var params = row.local_path
+      ? { chat_id: row.chat_id, path: row.local_path }
+      : { chat_id: row.chat_id, text: row.text, client_id: row.id }
+    if (startRequest(sendProc, method, params)) root.sending = true
   }
 
   function sendMessage(chatId, text) {
-    if (!chatId || !text || text.trim().length === 0 || requestScript === "" || sendProc.running) return
+    if (!chatId || !text || text.trim().length === 0 || requestScript === "") return false
     sendError = ""
     failedDraft = ""
-    var id = "pending-" + Date.now()
+    var id = root.nextOutgoingId()
     var body = text.trim()
     addOutgoing({
       id: id,
       chat_id: chatId,
       text: body,
       is_from_me: true,
-      send_state: "sending",
+      send_state: "queued",
+      send_error: "",
       created_at: new Date().toISOString(),
       local_path: "",
       attachments: []
     })
-    sendProc.chatId = chatId
-    sendProc.outgoingId = id
-    sendProc.restoreText = body
-    if (startRequest(sendProc, "messages.send", { chat_id: chatId, text: body })) {
-      sending = true
-    } else {
-      finishOutgoing(id, false)
-      failedDraft = body
-      sendError = ImsgClient.friendlyError("send failed")
-    }
+    root.drainOutgoing()
+    return true
   }
 
   function sendAttachment(chatId, path) {
-    if (!chatId || !path || String(path).length === 0 || requestScript === "" || sendProc.running) return
+    if (!chatId || !path || String(path).length === 0 || requestScript === "") return false
     sendError = ""
     failedDraft = ""
-    var id = "pending-" + Date.now()
+    var id = root.nextOutgoingId()
     var filePath = String(path)
     var slash = filePath.lastIndexOf("/")
     var name = slash >= 0 ? filePath.substring(slash + 1) : filePath
@@ -254,20 +268,14 @@ Item {
       chat_id: chatId,
       text: "",
       is_from_me: true,
-      send_state: "sending",
+      send_state: "queued",
+      send_error: "",
       created_at: new Date().toISOString(),
       local_path: filePath,
       attachments: [{ name: name }]
     })
-    sendProc.chatId = chatId
-    sendProc.outgoingId = id
-    sendProc.restoreText = ""
-    if (startRequest(sendProc, "messages.send_attachment", { chat_id: chatId, path: filePath })) {
-      sending = true
-    } else {
-      finishOutgoing(id, false)
-      sendError = ImsgClient.friendlyError("send failed")
-    }
+    root.drainOutgoing()
+    return true
   }
 
   function saveSettings(url, password) {
@@ -342,7 +350,7 @@ Item {
   function notifyInbound(sender, body, chatId) {
     var cmd = ImsgClient.notificationCommand(sender, body, chatId)
     if (notifyProc.running) {
-      root.pendingNotify = cmd
+      root.pendingNotify = root.pendingNotify.concat([cmd])
       return
     }
     notifyProc.command = cmd
@@ -499,6 +507,16 @@ Item {
     command: []
     property string payload: ""
     property string beforeCursor: ""
+    property string chatId: ""
+    property var pendingRequest: null
+    property var liveMessages: []
+    onExited: function() {
+      var pending = historyProc.pendingRequest
+      historyProc.pendingRequest = null
+      if (pending && String(pending.chat_id) === String(root.openChatId)) {
+        root.loadMessages(pending.chat_id, pending.before || null)
+      }
+    }
     stdinEnabled: true
     onStarted: {
       write(payload + "\n")
@@ -508,12 +526,9 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         var res = ImsgClient.parseResponse(text)
-        if (res && res.ok && res.result && res.result.messages) {
-          if (historyProc.beforeCursor.length > 0) {
-            root.messages = res.result.messages.concat(root.messages)
-          } else {
-            root.messages = res.result.messages
-          }
+        if (res && res.ok && res.result && res.result.messages && historyProc.chatId === String(root.openChatId)) {
+          var base = historyProc.beforeCursor.length > 0 ? Store.mergeMessages(res.result.messages, root.messages) : res.result.messages
+          root.messages = Store.mergeMessages(base, historyProc.liveMessages)
         }
         historyProc.beforeCursor = ""
       }
@@ -529,6 +544,7 @@ Item {
     property string outgoingId: ""
     property string restoreText: ""
     property string stderrText: ""
+    property var response: null
     stdinEnabled: true
     onStarted: {
       write(payload + "\n")
@@ -538,20 +554,7 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         var res = ImsgClient.parseResponse(text)
-        if (res && res.ok) {
-          root.finishOutgoing(sendProc.outgoingId, true)
-          root.sendError = ""
-          root.loadMessages(sendProc.chatId, null)
-          root.refreshChats()
-        } else if (res && res.error) {
-          root.finishOutgoing(sendProc.outgoingId, false)
-          root.failedDraft = sendProc.restoreText
-          root.sendError = ImsgClient.friendlyError(res.error.message || "send failed")
-        } else {
-          root.finishOutgoing(sendProc.outgoingId, false)
-          root.failedDraft = sendProc.restoreText
-          root.sendError = ImsgClient.friendlyError("send failed")
-        }
+        sendProc.response = res
       }
     }
     stderr: StdioCollector {
@@ -559,15 +562,41 @@ Item {
       onStreamFinished: { sendProc.stderrText = text }
     }
     onExited: function(exitCode) {
-      root.sending = false
-      if (exitCode !== 0 && (!root.sendError || root.sendError.length === 0)) {
-        root.finishOutgoing(sendProc.outgoingId, false)
-        if (sendProc.restoreText.length > 0) root.failedDraft = sendProc.restoreText
-        root.sendError = ImsgClient.friendlyError(sendProc.stderrText.trim() || ("send failed (code " + exitCode + ")"))
+      var res = sendProc.response
+      if (exitCode === 0 && res && res.ok) {
+        root.outgoing = Store.removeOutgoing(root.outgoing, sendProc.outgoingId)
+        root.sendError = ""
+        root.loadMessages(sendProc.chatId, null)
+        root.refreshChats()
+      } else {
+        var stillPending = false
+        for (var i = 0; i < root.outgoing.length; i++) {
+          if (String(root.outgoing[i].id) === String(sendProc.outgoingId)) {
+            stillPending = true
+            break
+          }
+        }
+        if (!stillPending) {
+          sendProc.stderrText = ""
+          sendProc.response = null
+          sendProc.outgoingId = ""
+          sendProc.restoreText = ""
+          root.sending = false
+          root.drainOutgoing()
+          return
+        }
+        var rawError = res && res.error ? res.error : sendProc.stderrText.trim()
+        var message = ImsgClient.friendlyError((res && res.error && res.error.message) || rawError || ("send ended without confirmation (code " + exitCode + ")"))
+        var state = Store.classifySendFailure(rawError, exitCode)
+        root.outgoing = Store.updateOutgoing(root.outgoing, sendProc.outgoingId, state, message)
+        root.sendError = message
       }
       sendProc.stderrText = ""
+      sendProc.response = null
       sendProc.outgoingId = ""
       sendProc.restoreText = ""
+      root.sending = false
+      root.drainOutgoing()
     }
   }
 
@@ -627,9 +656,9 @@ Item {
     running: false
     command: []
     onExited: function() {
-      if (!root.pendingNotify) return
-      notifyProc.command = root.pendingNotify
-      root.pendingNotify = null
+      if (root.pendingNotify.length === 0) return
+      notifyProc.command = root.pendingNotify[0]
+      root.pendingNotify = root.pendingNotify.slice(1)
       notifyProc.running = true
     }
   }
@@ -641,7 +670,10 @@ Item {
     stdout: SplitParser {
       onRead: function(data) { root.ingest(data) }
     }
-    onExited: function() { streamRetry.restart() }
+    onExited: function() {
+      root.connected = false
+      streamRetry.restart()
+    }
   }
 
   Timer {

@@ -41,6 +41,15 @@ pub struct BlueBubbles {
     contacts: RwLock<ContactBook>,
 }
 
+impl Drop for Subscription {
+    fn drop(&mut self) { self.pump.abort(); }
+}
+
+pub(crate) struct AbortTask(pub tokio::task::AbortHandle);
+impl Drop for AbortTask {
+    fn drop(&mut self) { self.0.abort(); }
+}
+
 pub struct Subscription {
     pub events: mpsc::Receiver<Message>,
     pub pump: JoinHandle<Result<()>>,
@@ -113,7 +122,7 @@ impl BlueBubbles {
         let encoded = path_encode(chat.as_str());
         let body = self
             .get(&format!(
-                "api/v1/chat/{encoded}/message?limit={limit}&offset=0&sort=DESC"
+                "api/v1/chat/{encoded}/message?limit={limit}&offset=0&sort=DESC&with=attachments,attributedBody"
             ))
             .await?;
         let data = envelope_data(&body)?;
@@ -126,22 +135,18 @@ impl BlueBubbles {
 
     pub async fn message_by_guid(&self, guid: &str) -> Result<Option<Message>, BbError> {
         let encoded = path_encode(guid.trim());
-        let body = match self.get(&format!("api/v1/message/{encoded}")).await {
+        let body = match self.get(&format!("api/v1/message/{encoded}?with=chats,attachments,attributedBody")).await {
             Ok(b) => b,
-            Err(BbError::Upstream(_)) => return Ok(None),
+            Err(BbError::Upstream(ref message)) if message.starts_with("http 404") => return Ok(None),
             Err(e) => return Err(e),
         };
-        let data = match envelope_data(&body) {
-            Ok(d) => d,
-            Err(_) => return Ok(None),
-        };
+        let data = envelope_data(&body)?;
         if data.is_null() {
             return Ok(None);
         }
-        match Message::from_bb(&data, None) {
-            Ok(m) => Ok(Some(m)),
-            Err(_) => Ok(None),
-        }
+        Message::from_bb(&data, None)
+            .map(Some)
+            .map_err(|e| BbError::Upstream(e.to_string()))
     }
 
     pub async fn webhook_list(&self) -> Result<Vec<Value>, BbError> {
@@ -272,7 +277,7 @@ impl BlueBubbles {
         let body = self
             .post(
                 "api/v1/message/query",
-                json!({"limit": limit, "offset": 0, "with": ["chats"]}),
+                json!({"limit": limit, "offset": 0, "sort": "DESC", "with": ["chats", "attachments", "attributedBody"]}),
             )
             .await?;
         let data = envelope_data(&body)?;
@@ -288,8 +293,12 @@ impl BlueBubbles {
     }
 
     pub fn subscribe(self: Arc<Self>) -> Subscription {
+        self.subscribe_every(Duration::from_secs(2))
+    }
+
+    pub fn subscribe_every(self: Arc<Self>, interval: Duration) -> Subscription {
         let (tx, rx) = mpsc::channel(256);
-        let pump = tokio::spawn(async move { poll_loop(self, tx).await });
+        let pump = tokio::spawn(async move { poll_loop(self, tx, interval).await });
         Subscription { events: rx, pump }
     }
 
@@ -336,7 +345,7 @@ fn transport(e: reqwest::Error) -> BbError {
     } else if e.is_connect() {
         BbError::LinkDown
     } else {
-        BbError::Transport(e.into())
+        BbError::Transport(e.without_url().into())
     }
 }
 
@@ -449,30 +458,32 @@ fn envelope_data(body: &Value) -> Result<Value, BbError> {
     Ok(body.get("data").cloned().unwrap_or(Value::Null))
 }
 
-async fn poll_loop(client: Arc<BlueBubbles>, tx: mpsc::Sender<Message>) -> Result<()> {
-    let mut seen: VecDeque<String> = VecDeque::new();
+async fn poll_loop(client: Arc<BlueBubbles>, tx: mpsc::Sender<Message>, interval: Duration) -> Result<()> {
+    let mut seen: VecDeque<Message> = VecDeque::new();
     loop {
-        match client.recent_messages(40).await {
+        match client.recent_messages(200).await {
             Ok(msgs) => {
                 for msg in msgs.into_iter().rev() {
-                    let g = msg.guid.as_str().to_string();
-                    if seen.iter().any(|s| s == &g) {
-                        continue;
-                    }
-                    seen.push_back(g);
-                    while seen.len() > 2000 {
-                        seen.pop_front();
-                    }
+                    if !remember_message(&mut seen, &msg) { continue; }
                     if tx.send(msg).await.is_err() {
                         return Ok(());
                     }
                 }
             }
-            Err(BbError::LinkDown) => return Err(anyhow::anyhow!("link down")),
-            Err(e) => tracing::warn!("poll: {e}"),
+            Err(e) => return Err(e.into()),
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(interval).await;
     }
+}
+
+fn remember_message(seen: &mut VecDeque<Message>, msg: &Message) -> bool {
+    if let Some(index) = seen.iter().position(|old| old.guid == msg.guid) {
+        if &seen[index] == msg { return false; }
+        seen.remove(index);
+    }
+    seen.push_back(msg.clone());
+    while seen.len() > 2000 { seen.pop_front(); }
+    true
 }
 
 pub fn dedupe_guid(seen: &mut VecDeque<MessageGuid>, guid: &MessageGuid) -> bool {
@@ -489,6 +500,32 @@ pub fn dedupe_guid(seen: &mut VecDeque<MessageGuid>, guid: &MessageGuid) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn realtime_message_updates_are_not_dropped_by_guid() {
+        let mut seen = VecDeque::new();
+        let chat = ChatGuid::parse("iMessage;-;+1").unwrap();
+        let mut msg = message_from_send_response(json!({}), &chat, "before", "m1", None).unwrap();
+        assert!(remember_message(&mut seen, &msg));
+        assert!(!remember_message(&mut seen, &msg));
+        msg.text = "edited".into();
+        assert!(remember_message(&mut seen, &msg));
+        assert!(!remember_message(&mut seen, &msg));
+        assert_eq!(seen.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn realtime_subscription_drop_aborts_worker() {
+        let (tx, rx) = mpsc::channel(1);
+        let pump = tokio::spawn(async move {
+            let _tx = tx;
+            std::future::pending::<Result<()>>().await
+        });
+        let abort = pump.abort_handle();
+        drop(Subscription { events: rx, pump });
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
+    }
 
     #[test]
     fn envelope_ok_and_error() {
