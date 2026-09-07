@@ -56,4 +56,11 @@ assert.match(panel, /Component\.onCompleted: Qt\.callLater\(root\.updateThreadMo
 assert.match(panel, /onImsgChanged: Qt\.callLater\(root\.updateThreadModel\)/)
 assert.doesNotMatch(service, /if \(sendProc\.restoreText\.length > 0\) root\.failedDraft = sendProc\.restoreText/)
 
+const pickAttachmentBody = panel.match(/function pickAttachment\(\) \{([\s\S]*?)\n  \}/)[1]
+let opened = false
+vm.runInNewContext("(function() {" + pickAttachmentBody + "})()", {
+  Models: { hasId: () => true }, selectedChatId: "chat", imsg: { sending: true },
+  photoDialog: { open: () => { opened = true } },
+})
+assert.equal(opened, true, "Photo must open while another message is sending")
 console.log("plugin-realtime.test.mjs ok")

@@ -144,7 +144,7 @@ Panel {
   }
 
   function pickAttachment() {
-    if (!Models.hasId(selectedChatId) || (imsg && imsg.sending)) return
+    if (!Models.hasId(selectedChatId)) return
     photoDialog.open()
   }
 

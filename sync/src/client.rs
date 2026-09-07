@@ -31,8 +31,10 @@ impl RetryBackoff {
         }
     }
 
-    fn reset(&mut self) {
-        self.failures = 0;
+    fn record_session(&mut self, duration: std::time::Duration) {
+        if duration >= RETRY_MAX {
+            self.failures = 0;
+        }
     }
 
     fn next_delay(&mut self) -> std::time::Duration {
@@ -225,7 +227,6 @@ async fn connect_and_sync_inner(
         return Ok(());
     }
     let bb = BlueBubbles::connect(creds.clone()).await?;
-    retry.reset();
     info!("connected to BlueBubbles");
     handle.attach(Arc::clone(&bb)).await;
     link.set_connecting(false);
@@ -240,13 +241,16 @@ async fn connect_and_sync_inner(
         }
     };
 
-    if creds.public.webhook_enabled {
+    let live_started = std::time::Instant::now();
+    let result = if creds.public.webhook_enabled {
         live_webhook(bb, creds, cache, events, link, gen, wake, prefetch_ok).await
     } else {
         let _ = handle.webhook_clear_ours().await;
         link.set_webhook_listening(false);
         live_poll(bb, creds, cache, events, gen, wake, prefetch_ok).await
-    }
+    };
+    retry.record_session(live_started.elapsed());
+    result
 }
 
 async fn live_poll(
@@ -473,7 +477,9 @@ mod tests {
             assert!(retry.next_delay() <= RETRY_MAX);
         }
 
-        retry.reset();
+        retry.record_session(std::time::Duration::from_secs(1));
+        assert_eq!(retry.next_delay(), RETRY_MAX);
+        retry.record_session(RETRY_MAX);
         let after_reset = retry.next_delay();
         assert!(after_reset >= RETRY_MIN);
         assert!(after_reset <= RETRY_MIN + RETRY_MIN / 4);
