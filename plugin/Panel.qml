@@ -92,6 +92,15 @@ Panel {
     }
   }
 
+  onOpenedChanged: updateActiveChat()
+  onSettingsVisibleChanged: updateActiveChat()
+
+  function updateActiveChat() {
+    if (!imsg) return
+    imsg.openChatId = opened && !settingsVisible ? selectedChatId : ""
+    if (imsg.openChatId) imsg.markRead(imsg.openChatId)
+  }
+
   function close() {
     if (imsg) imsg.openChatId = ""
     root.controller.hide()
@@ -113,25 +122,29 @@ Panel {
     draftText = ""
     root.pinThreadToEnd = true
     if (imsg) {
-      imsg.openChatId = selectedChatId
-      imsg.markRead(selectedChatId)
+      if (String(imsg.openChatId) !== selectedChatId) imsg.messages = []
+      updateActiveChat()
       imsg.loadMessages(selectedChatId, null)
     }
     root.stickThread()
   }
 
   function sendDraft() {
-    if (!imsg || !Models.hasId(selectedChatId) || draftText.trim().length === 0 || imsg.sending) return
+    if (!imsg || !Models.hasId(selectedChatId) || draftText.trim().length === 0) return
     var text = draftText
     root.draftText = ""
     if (draftField) draftField.text = ""
-    imsg.sendMessage(selectedChatId, text)
+    if (!imsg.sendMessage(selectedChatId, text)) {
+      root.draftText = text
+      if (draftField) draftField.text = text
+      return
+    }
     root.stickThread()
     root.focusComposer()
   }
 
   function pickAttachment() {
-    if (!Models.hasId(selectedChatId) || (imsg && imsg.sending)) return
+    if (!Models.hasId(selectedChatId)) return
     photoDialog.open()
   }
 
@@ -162,6 +175,42 @@ Panel {
       root.stickingThread = false
     })
   }
+
+  function updateThreadModel() {
+    var messages = imsg ? imsg.displayMessages : []
+    var anchorId = ""
+    var anchorOffset = 0
+    if (!root.pinThreadToEnd && threadView.count > 0) {
+      var index = threadView.indexAt(threadView.width / 2, threadView.contentY + 1)
+      var item = threadView.itemAtIndex(index)
+      if (index >= 0 && item) {
+        anchorId = String(threadModel.get(index).entry.id)
+        anchorOffset = threadView.contentY - item.y
+      }
+    }
+    Store.syncListModel(threadModel, messages)
+    threadView.forceLayout()
+    if (root.pinThreadToEnd) {
+      root.stickThread()
+      return
+    }
+    for (var i = 0; anchorId !== "" && i < threadModel.count; i++) {
+      if (String(threadModel.get(i).entry.id) !== anchorId) continue
+      threadView.positionViewAtIndex(i, ListView.Beginning)
+      threadView.forceLayout()
+      var anchor = threadView.itemAtIndex(i)
+      if (anchor) threadView.contentY = anchor.y + anchorOffset
+      break
+    }
+  }
+
+  ListModel {
+    id: threadModel
+    dynamicRoles: true
+  }
+
+  Component.onCompleted: Qt.callLater(root.updateThreadModel)
+  onImsgChanged: Qt.callLater(root.updateThreadModel)
 
   function composerKey(event) {
     if (event.key === Qt.Key_Escape) {
@@ -567,7 +616,7 @@ Panel {
               anchors.right: parent.right
               anchors.bottom: composerRow.top
               anchors.bottomMargin: Style.space(8)
-              model: imsg ? imsg.displayMessages : []
+              model: threadModel
               clip: true
               spacing: Style.space(6)
               boundsBehavior: Flickable.StopAtBounds
@@ -608,6 +657,8 @@ Panel {
               }
 
               delegate: Item {
+                required property var entry
+                readonly property var modelData: entry
                 visible: Models.messageText(modelData).length > 0 || Models.hasLocalPhoto(modelData)
                 width: ListView.view ? ListView.view.width : 0
                 height: visible ? bubble.height : 0
@@ -655,11 +706,21 @@ Panel {
 
                     Text {
                       width: parent.width
-                      visible: bubble.fromMe && (modelData.send_state === "sending" || modelData.send_state === "failed")
-                      text: modelData.send_state === "failed" ? "Not delivered" : "Sending"
-                      color: modelData.send_state === "failed" ? root.urgent : root.dim
+                      visible: bubble.fromMe && (modelData.send_state === "queued" || modelData.send_state === "sending" || modelData.send_state === "failed" || modelData.send_state === "unconfirmed")
+                      text: modelData.send_state === "failed" ? (modelData.send_error || "Not delivered")
+                        : modelData.send_state === "unconfirmed" ? (modelData.send_error || "Send not confirmed")
+                        : modelData.send_state === "queued" ? "Queued" : "Sending"
+                      color: modelData.send_state === "failed" || modelData.send_state === "unconfirmed" ? root.urgent : root.dim
                       font.family: root.family
                       font.pixelSize: Style.font.caption
+                    }
+
+                    Button {
+                      visible: modelData.send_state === "failed" || modelData.send_state === "unconfirmed"
+                      text: modelData.send_state === "unconfirmed" ? "Retry (may duplicate)" : "Retry"
+                      foreground: root.fg
+                      fontFamily: root.family
+                      onClicked: imsg.retryMessage(modelData.id)
                     }
                   }
                 }
@@ -690,7 +751,7 @@ Panel {
                 text: "Photo"
                 foreground: root.fg
                 fontFamily: root.family
-                enabled: Models.hasId(selectedChatId) && imsg && !imsg.sending
+                enabled: Models.hasId(selectedChatId) && imsg
                 onClicked: root.pickAttachment()
               }
 
@@ -709,10 +770,10 @@ Panel {
 
               Button {
                 id: sendBtn
-                text: imsg && imsg.sending ? "…" : "Send"
+                text: "Send"
                 foreground: root.fg
                 fontFamily: root.family
-                enabled: Models.hasId(selectedChatId) && imsg && !imsg.sending && root.draftText.trim().length > 0
+                enabled: Models.hasId(selectedChatId) && imsg && root.draftText.trim().length > 0
                 onClicked: root.sendDraft()
               }
             }
@@ -726,7 +787,7 @@ Panel {
     target: imsg
     function onChatsChanged() {
       if (root.opened) root.maybeSelectFirst()
-      if (!imsg || !Models.hasId(selectedChatId) || !imsg.chats) return
+      if (!root.opened || root.settingsVisible || !imsg || !Models.hasId(selectedChatId) || !imsg.chats) return
       for (var i = 0; i < imsg.chats.length; i++) {
         if (Models.sameId(imsg.chats[i].id, selectedChatId) && (imsg.chats[i].unread_count || 0) > 0) {
           imsg.markRead(selectedChatId)
@@ -738,7 +799,7 @@ Panel {
       if (root.pinThreadToEnd) root.stickThread()
     }
     function onDisplayMessagesChanged() {
-      if (root.pinThreadToEnd) root.stickThread()
+      root.updateThreadModel()
     }
     function onFailedDraftChanged() {
       if (!imsg || !imsg.failedDraft || imsg.failedDraft.length === 0) return

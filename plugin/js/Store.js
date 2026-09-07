@@ -54,13 +54,14 @@ function applyMessage(state, payload) {
     patch.unreadCount = totalUnread(patch.chats)
   }
   var msg = payload.message
+  if (msg && msg.client_id) patch.outgoing = removeOutgoing(state.outgoing || [], msg.client_id)
   if (msg && state.openChatId && String(msg.chat_id) === String(state.openChatId)) {
     patch.messages = appendMessage(state.messages || [], msg)
   }
   if (payload.is_new && msg && msg.is_from_me !== true && String(msg.chat_id) !== String(state.openChatId)) {
     patch.notify = {
       sender: notifySender(msg, payload.chat || findChat(state.chats, msg.chat_id)),
-      preview: msg.text || "",
+      preview: msg.text || (msg.attachments && msg.attachments.length ? "Attachment" : "New message"),
       chatId: msg.chat_id
     }
   }
@@ -96,7 +97,96 @@ function appendMessage(messages, msg) {
       return copy
     }
   }
-  return messages.concat([msg])
+  return mergeMessages(messages, [msg])
+}
+
+function mergeMessages(messages, updates) {
+  var byId = {}
+  var all = (messages || []).concat(updates || [])
+  for (var i = 0; i < all.length; i++) byId[String(all[i].id)] = all[i]
+  var out = []
+  for (var key in byId) out.push(byId[key])
+  out.sort(function(a, b) {
+    var at = String(a.created_at || "")
+    var bt = String(b.created_at || "")
+    return at < bt ? -1 : at > bt ? 1 : String(a.id).localeCompare(String(b.id))
+  })
+  return out
+}
+
+function syncListModel(model, messages) {
+  messages = messages || []
+  for (var i = 0; i < messages.length; i++) {
+    var id = String(messages[i].id)
+    var found = i
+    while (found < model.count && String(model.get(found).entry.id) !== id) found++
+    if (found === model.count) model.insert(i, { entry: messages[i] })
+    else {
+      if (found !== i) model.move(found, i, 1)
+      if (JSON.stringify(model.get(i).entry) !== JSON.stringify(messages[i])) model.set(i, { entry: messages[i] })
+    }
+  }
+  if (model.count > messages.length) model.remove(messages.length, model.count - messages.length)
+}
+
+function enqueueOutgoing(outgoing, row) {
+  return (outgoing || []).concat([row])
+}
+
+function nextQueuedOutgoing(outgoing) {
+  for (var i = 0; i < (outgoing || []).length; i++) {
+    if (outgoing[i].send_state === "queued") return outgoing[i]
+  }
+  return null
+}
+
+function updateOutgoing(outgoing, id, sendState, error) {
+  var next = (outgoing || []).slice()
+  for (var i = 0; i < next.length; i++) {
+    if (String(next[i].id) !== String(id)) continue
+    var row = {}
+    for (var key in next[i]) row[key] = next[i][key]
+    row.send_state = sendState
+    row.send_error = error || ""
+    next[i] = row
+    break
+  }
+  return next
+}
+
+function removeOutgoing(outgoing, id) {
+  var next = []
+  for (var i = 0; i < (outgoing || []).length; i++) {
+    if (String(outgoing[i].id) !== String(id)) next.push(outgoing[i])
+  }
+  return next
+}
+
+function retryOutgoing(outgoing, id, nextId, createdAt) {
+  var next = (outgoing || []).slice()
+  for (var i = 0; i < next.length; i++) {
+    if (String(next[i].id) !== String(id)) continue
+    if (next[i].send_state !== "failed" && next[i].send_state !== "unconfirmed") return outgoing
+    var row = {}
+    for (var key in next[i]) row[key] = next[i][key]
+    row.id = nextId
+    row.send_state = "queued"
+    row.send_error = ""
+    row.created_at = createdAt
+    next[i] = row
+    break
+  }
+  return next
+}
+
+function classifySendFailure(error, exitCode) {
+  var code = String(error && error.code || "").toLowerCase()
+  var message = String(error && error.message || error || "").toLowerCase()
+  if (exitCode !== 0 && !error) return "unconfirmed"
+  if (code === "timeout" || code === "transport" || code === "sync_down" || code === "upstream_error") return "unconfirmed"
+  if (message.indexOf("timeout") !== -1 || message.indexOf("timed out") !== -1) return "unconfirmed"
+  if (message.indexOf("connection") !== -1 || message.indexOf("transport") !== -1) return "unconfirmed"
+  return "failed"
 }
 
 function isPersonName(value) {
@@ -203,7 +293,7 @@ function webhookGuide(s) {
       phase: "ready",
       step: 3,
       steps: 3,
-      title: "Listening. Registered with BlueBubbles. Poll is off.",
+      title: "Listening. Registered with BlueBubbles. Recovery sync is on.",
       body: "",
       actionKind: "",
       actionLabel: ""
@@ -215,7 +305,7 @@ function webhookGuide(s) {
       step: 1,
       steps: 3,
       title: "Turn on the webhook",
-      body: "BlueBubbles pokes this machine. We then pull the real iMessage with your password. Poll turns off.",
+      body: "BlueBubbles pokes this machine. We then pull the real iMessage with your password. Recovery sync stays on.",
       actionKind: "enable",
       actionLabel: "Turn on webhook"
     }

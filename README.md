@@ -74,7 +74,7 @@ Reconnect from Settings retries the Mac without restarting the daemon.
 
 New iMessages default to a 2s REST poll. Settings can switch to a webhook doorbell.
 The POST is only a poke. imsg-sync then pulls the real message over REST with the
-password. Poll is off while the webhook is on.
+password. A 30-second REST recovery sync remains active while the webhook is on. It checks the latest 200 messages; it is not a complete historical backfill.
 
 Settings walks you through three steps. Turn on the webhook, publish with
 Tailscale, then register with BlueBubbles. Register is the step that is easy

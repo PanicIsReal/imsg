@@ -42,7 +42,7 @@ imsg setup connect --url http://<mac-tailscale-ip>:1234 --password <password>
 Prefer the panel form so the password does not land in shell history.
 
 Settings walks webhook setup in three steps. Turn on, publish with Tailscale,
-then register with BlueBubbles. Poll is off while the webhook is on. Messages
+then register with BlueBubbles. Webhooks trigger immediate REST fetches; a 30-second recovery sync stays on while the webhook is enabled. Without webhooks, polling runs every two seconds. Messages
 still come from REST. Restrict the Serve ACL to your Mac. Remove serve clears
 an active Tailscale Serve config.
 
@@ -75,3 +75,6 @@ omarchy plugin remove io.github.panic.imessage
 
 This command deletes the plugin files and the bar entry. It does not stop
 `imsg-sync` or delete the local message cache.
+
+Recovery sync checks the latest 200 messages. Long outages or larger bursts need
+a paginated catch-up implementation before claiming lossless synchronization.
