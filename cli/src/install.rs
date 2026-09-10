@@ -115,40 +115,12 @@ fn install_mac_launchagent(imsg: &PathBuf) -> Result<()> {
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
     }
 
-    fs::write(
-        &launchd_sh,
-        format!(
-            r#"#!/bin/bash
-set -euo pipefail
-WRAPPER="{}"
-APP="/Applications/Ghostty.app"
-PORT=18789
-
-serve_up() {{
-  /usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1
-}}
-
-if ! serve_up; then
-  /usr/bin/open -na "$APP" --args -e "$WRAPPER"
-  sleep 3
-fi
-
-if ! serve_up; then
-  sleep 30
-  exit 1
-fi
-
-while serve_up; do
-  sleep 5
-done
-"#,
-            wrapper.display()
-        ),
-    )?;
+    // Historical path. The agent execs `wrapper`, not this file.
+    let _ = fs::copy(&wrapper, &launchd_sh);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&launchd_sh, fs::Permissions::from_mode(0o755))?;
+        let _ = fs::set_permissions(&launchd_sh, fs::Permissions::from_mode(0o755));
     }
 
     let plist = format!(
@@ -166,6 +138,11 @@ done
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin</string>
+    </dict>
     <key>StandardOutPath</key>
     <string>/tmp/imsg-bridge.out.log</string>
     <key>StandardErrorPath</key>
@@ -173,7 +150,7 @@ done
 </dict>
 </plist>
 "#,
-        launchd_sh.display()
+        wrapper.display()
     );
 
     if let Some(parent) = plist_path.parent() {
@@ -277,13 +254,17 @@ fn install_plugin(src: &PathBuf) -> Result<()> {
     fs::create_dir_all(&local_bin)?;
     let imsg_src = info::imsg_path().unwrap_or_else(|_| PathBuf::from("imsg"));
     let imsg_link = local_bin.join("imsg");
-    if imsg_link.exists() {
-        let _ = fs::remove_file(&imsg_link);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-        let _ = symlink(&imsg_src, &imsg_link);
+    let src_canon = fs::canonicalize(&imsg_src).unwrap_or(imsg_src.clone());
+    let dest_canon = fs::canonicalize(&imsg_link).ok();
+    if dest_canon.as_ref() != Some(&src_canon) {
+        if imsg_link.exists() || imsg_link.symlink_metadata().is_ok() {
+            let _ = fs::remove_file(&imsg_link);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let _ = symlink(&src_canon, &imsg_link);
+        }
     }
     let omarchy_path = std::env::var("OMARCHY_PATH").unwrap_or_else(|_| "/usr/share/omarchy".into());
     let _ = Command::new("omarchy")
