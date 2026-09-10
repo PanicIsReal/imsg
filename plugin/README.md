@@ -14,7 +14,7 @@ brew install steipete/tap/imsg
 
 `imsg-bridge serve` installs that formula when Homebrew is already present. If Homebrew is missing, install it from https://brew.sh, then run the command above.
 
-The Mac bridge also needs Full Disk Access for Ghostty so it can read Messages. The plugin never asks for that permission itself.
+The Mac bridge also needs Full Disk Access for `imsg` so it can read Messages. The plugin never asks for that permission itself.
 
 ## Install
 

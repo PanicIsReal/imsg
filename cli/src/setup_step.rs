@@ -11,7 +11,6 @@ pub fn run(id: StepId, bind: Option<String>, mdns: bool, json: bool) -> Result<(
         StepId::Detect => {
             let platform = info::detect();
             let bind = info::tailscale_ip_hint();
-            let ghostty = std::path::Path::new("/Applications/Ghostty.app").exists();
             let detail = match &bind {
                 Some(ip) => format!("{}/{} · tailscale {ip}", platform.os, platform.arch),
                 None => format!("{}/{}", platform.os, platform.arch),
@@ -24,7 +23,6 @@ pub fn run(id: StepId, bind: Option<String>, mdns: bool, json: bool) -> Result<(
                 "role": platform.role,
                 "hostname": platform.hostname,
                 "bind": bind,
-                "ghostty": ghostty,
                 "detail": detail,
             })
         }

@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use imsg_proto::ContactsState;
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -230,7 +231,7 @@ pub async fn names_visible(rpc: &ImsgRpc) -> Result<bool> {
     Ok(chats_have_visible_names(&result))
 }
 
-/// Raises the system Contacts dialog in a Ghostty-parented TTY and drives
+/// Raises the system Contacts dialog in a Terminal.app TTY and drives
 /// the attempt to a terminal state.
 pub async fn authorize(
     config: &Config,
@@ -270,7 +271,7 @@ async fn authorize_inner(config: &Config, rpc: &Arc<ImsgRpc>) -> Result<Contacts
                 }
             }
             Step::Prompt => match pick_handle(rpc).await {
-                Ok(handle) => match prompt_via_ghostty(config, &handle).await {
+                Ok(handle) => match prompt_via_terminal(config, &handle).await {
                     Ok(()) => Step::AwaitUser {
                         deadline: await_deadline,
                     },
@@ -342,43 +343,59 @@ async fn pick_handle(rpc: &ImsgRpc) -> Result<String> {
     first_handle(&result).context("no chat handle available to request Contacts")
 }
 
-/// `open -na Ghostty.app --args -e "<imsg> nickname --local"` — a TTY stdin, so
-/// `ContactsAccessPolicy::forStdin(isTTY: true)` prompts instead of skipping.
-async fn prompt_via_ghostty(config: &Config, handle: &str) -> Result<(), ContactsOutcome> {
-    let ghostty = PathBuf::from(&config.ghostty_path);
-    if !ghostty.exists() {
-        return Err(ContactsOutcome::HelperMissing {
-            detail: format!("Ghostty not found at {}", ghostty.display()),
-        });
-    }
+/// Homebrew imsg only raises the Contacts dialog when stdin is a TTY.
+async fn prompt_via_terminal(config: &Config, handle: &str) -> Result<(), ContactsOutcome> {
     let imsg = resolve_imsg_path(&config.imsg_path);
     if !imsg_usable(&imsg) {
         return Err(ContactsOutcome::HelperMissing {
             detail: format!("imsg not found at {}", imsg.display()),
         });
     }
+    let script = std::env::temp_dir().join(format!(
+        "imsg-contacts-{}.command",
+        std::process::id()
+    ));
+    let body = format!(
+        "#!/bin/bash\nexec {} nickname --address {} --local --json\n",
+        sh_single_quote(&imsg.to_string_lossy()),
+        sh_single_quote(handle),
+    );
+    tokio::fs::write(&script, body).await.map_err(|e| {
+        ContactsOutcome::HelperMissing {
+            detail: format!("write Terminal script: {e}"),
+        }
+    })?;
+    let mut perms = tokio::fs::metadata(&script)
+        .await
+        .map_err(|e| ContactsOutcome::HelperMissing {
+            detail: format!("stat Terminal script: {e}"),
+        })?
+        .permissions();
+    perms.set_mode(0o755);
+    tokio::fs::set_permissions(&script, perms)
+        .await
+        .map_err(|e| ContactsOutcome::HelperMissing {
+            detail: format!("chmod Terminal script: {e}"),
+        })?;
     let status = Command::new("open")
-        .arg("-na")
-        .arg(&ghostty)
-        .arg("--args")
-        .arg("-e")
-        .arg(&imsg)
-        .arg("nickname")
-        .arg("--address")
-        .arg(handle)
-        .arg("--local")
-        .arg("--json")
+        .arg("-a")
+        .arg("Terminal")
+        .arg(&script)
         .status()
         .await
         .map_err(|e| ContactsOutcome::HelperMissing {
-            detail: format!("open Ghostty: {e}"),
+            detail: format!("open Terminal: {e}"),
         })?;
     if !status.success() {
         return Err(ContactsOutcome::HelperMissing {
-            detail: format!("open Ghostty exited {status}"),
+            detail: format!("open Terminal exited {status}"),
         });
     }
     Ok(())
+}
+
+fn sh_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 fn imsg_usable(path: &Path) -> bool {
@@ -461,6 +478,13 @@ mod tests {
             first_handle(&participants_only).as_deref(),
             Some("+15550999")
         );
+    }
+
+    #[test]
+    fn sh_single_quote_wraps_and_escapes() {
+        assert_eq!(sh_single_quote("/opt/homebrew/bin/imsg"), "'/opt/homebrew/bin/imsg'");
+        assert_eq!(sh_single_quote("+15551212"), "'+15551212'");
+        assert_eq!(sh_single_quote("o'brien"), "'o'\\''brien'");
     }
 
     #[test]

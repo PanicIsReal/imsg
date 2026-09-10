@@ -8,9 +8,9 @@ iMessage on Omarchy, over Tailscale.
 
 ### Mac
 
-1. Install [Ghostty](https://ghostty.org) and grant it Full Disk Access.
+1. Grant Full Disk Access to `~/.local/bin/imsg` and Homebrew `/opt/homebrew/bin/imsg`.
 2. Download `imsg-macos-aarch64.tar.gz` from [GitHub Releases](https://github.com/PanicIsReal/imsg/releases).
-3. Open **Imsg Setup**, or run `imsg setup` in Ghostty.
+3. Open **Imsg Setup**, or run `imsg setup` in Terminal.
 4. Work the checklist. The pairing code stays on screen after enroll is up.
 5. When asked, connect Omarchy over SSH. The default host is `omarchy` if that SSH alias exists.
 

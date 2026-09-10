@@ -20,4 +20,7 @@ elif [[ -x "$PARENT/imsg-tui" ]]; then
   export IMSG_TUI="$PARENT/imsg-tui"
 fi
 export IMSG_BIN="$IMSG"
-exec /usr/bin/open -na /Applications/Ghostty.app --args -e "$IMSG" setup
+SCRIPT="$(mktemp -t imsg-setup).command"
+printf '#!/bin/bash\nexec %q setup\n' "$IMSG" > "$SCRIPT"
+chmod +x "$SCRIPT"
+exec /usr/bin/open -a Terminal "$SCRIPT"

@@ -12,9 +12,6 @@ pub struct Config {
     #[serde(default = "default_enroll_port")]
     pub enroll_port: u16,
     pub imsg_path: String,
-    /// Ghostty is the FDA/TCC parent of the running bridge.
-    #[serde(default = "default_ghostty_path")]
-    pub ghostty_path: String,
     pub enable_send: bool,
     pub data_dir: PathBuf,
     pub pairing_code: Option<String>,
@@ -29,10 +26,6 @@ fn default_enroll_port() -> u16 {
     18790
 }
 
-fn default_ghostty_path() -> String {
-    "/Applications/Ghostty.app".into()
-}
-
 impl Default for Config {
     fn default() -> Self {
         let data_dir = dirs::config_dir()
@@ -43,7 +36,6 @@ impl Default for Config {
             port: 18789,
             enroll_port: 18790,
             imsg_path: "imsg".into(),
-            ghostty_path: default_ghostty_path(),
             enable_send: false,
             data_dir,
             pairing_code: None,

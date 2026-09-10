@@ -332,7 +332,7 @@ function setupGuide(s) {
     return {
       phase: "needs-fda",
       title: "Messages is locked on your Mac",
-      body: "Grant Full Disk Access to Ghostty, the window titled imsg-bridge-serve. The list appears after that.",
+      body: "Grant Full Disk Access to imsg on the Mac. The list appears after that.",
       hint: "",
       actionKind: ""
     }
