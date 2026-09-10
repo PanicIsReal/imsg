@@ -31,6 +31,7 @@ pub enum BridgeEvent {
     Message(Value),
     DbGeneration { generation: String },
     Contacts(ContactsState),
+    WatchGap { reason: String },
     Unknown { topic: String },
 }
 
@@ -50,6 +51,13 @@ impl BridgeEvent {
                     .to_string(),
             },
             "contacts" => Self::Contacts(contacts_state_from_payload(payload)),
+            "watch.gap" => Self::WatchGap {
+                reason: payload
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            },
             _ => Self::Unknown {
                 topic: topic.clone(),
             },
@@ -105,6 +113,17 @@ mod tests {
         assert_eq!(
             BridgeEvent::from_envelope(&contacts),
             Some(BridgeEvent::Contacts(ContactsState::Granted))
+        );
+
+        let gap = Envelope::Event {
+            topic: "watch.gap".into(),
+            payload: json!({"reason": "rpc_restart"}),
+        };
+        assert_eq!(
+            BridgeEvent::from_envelope(&gap),
+            Some(BridgeEvent::WatchGap {
+                reason: "rpc_restart".into()
+            })
         );
     }
 

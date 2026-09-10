@@ -1,18 +1,7 @@
 use crate::BridgeCommands;
 use anyhow::Result;
-use imsg_bridge::install_crypto_provider;
-use tracing_subscriber::EnvFilter;
 
 pub async fn run(command: crate::BridgeCommands, json: bool) -> Result<()> {
-    install_crypto_provider();
-    if !json {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::from_default_env().add_directive("imsg_bridge=info".parse()?),
-            )
-            .init();
-    }
-
     match command {
         BridgeCommands::Init { bind, port, mdns } => {
             let result = imsg_bridge::commands::init(bind, port, mdns)?;
@@ -62,8 +51,4 @@ pub async fn run(command: crate::BridgeCommands, json: bool) -> Result<()> {
         }
     }
     Ok(())
-}
-
-pub async fn run_bridge(args: crate::BridgeArgs, json: bool) -> Result<()> {
-    run(args.command, json).await
 }

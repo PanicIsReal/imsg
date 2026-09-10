@@ -96,12 +96,6 @@ pub enum SetupCommands {
     },
 }
 
-#[derive(clap::Args, Clone)]
-pub struct BridgeArgs {
-    #[command(subcommand)]
-    pub command: BridgeCommands,
-}
-
 #[derive(Subcommand, Clone)]
 pub enum BridgeCommands {
     Init {
@@ -126,12 +120,6 @@ pub enum BridgeCommands {
     Doctor,
 }
 
-#[derive(clap::Args, Clone)]
-pub struct SyncArgs {
-    #[command(subcommand)]
-    pub command: SyncCommands,
-}
-
 #[derive(Subcommand, Clone)]
 pub enum SyncCommands {
     Run,
@@ -149,6 +137,15 @@ async fn main() -> Result<()> {
     imsg_bridge::install_crypto_provider();
     let cli = Cli::parse();
     let json = cli.json;
+    if !json {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "imsg_bridge=info,imsg_sync=info".into()),
+            )
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     match cli.command {
         Commands::Setup { command } => setup_cmd::run(command, json).await,

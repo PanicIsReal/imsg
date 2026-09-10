@@ -1,0 +1,3 @@
+metric	count	p50_ms	p95_ms	max_ms
+native_db_to_watch_100ms	20	107.063	120.481	148.488
+native_db_to_watch_500ms	20	533.357	539.830	543.503

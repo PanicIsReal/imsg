@@ -9,9 +9,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 fn install_crypto_provider() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("failed to install rustls ring crypto provider");
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 #[derive(Parser)]

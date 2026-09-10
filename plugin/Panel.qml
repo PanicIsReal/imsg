@@ -16,6 +16,10 @@ Panel {
   property var imsg: null
   property int selectedChatId: 0
   property string draftText: ""
+  property var draftsByChat: ({})
+  property bool followNextMessage: false
+  property bool autoFollowThread: true
+  property var pendingFrameMetrics: []
 
   readonly property var barIdentity: hostWidget || root
   readonly property color dim: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.15)
@@ -62,6 +66,7 @@ Panel {
   }
 
   function close() {
+    root.pendingFrameMetrics = []
     if (imsg) imsg.openChatId = 0
     root.controller.hide()
   }
@@ -72,8 +77,10 @@ Panel {
   }
 
   function openChat(chatId) {
+    if (selectedChatId > 0) saveDraft(selectedChatId, draftText)
     selectedChatId = chatId
-    draftText = ""
+    autoFollowThread = true
+    draftText = draftsByChat[String(chatId)] || ""
     if (imsg) {
       imsg.openChatId = chatId
       imsg.loadMessages(chatId, null)
@@ -82,9 +89,92 @@ Panel {
 
   function sendDraft() {
     if (!imsg || selectedChatId <= 0 || draftText.trim().length === 0) return
-    imsg.sendMessage(selectedChatId, draftText)
+    var wasFollowing = root.autoFollowThread
+    root.autoFollowThread = true
+    root.followNextMessage = true
+    if (!imsg.sendMessage(selectedChatId, draftText)) {
+      root.autoFollowThread = wasFollowing
+      root.followNextMessage = false
+      return
+    }
     draftText = ""
+    saveDraft(selectedChatId, "")
+    Qt.callLater(function() { threadView.positionViewAtEnd() })
   }
+
+  function saveDraft(chatId, text) {
+    var copy = {}
+    for (var key in draftsByChat) copy[key] = draftsByChat[key]
+    copy[String(chatId)] = text
+    draftsByChat = copy
+  }
+
+  function nearThreadBottom() {
+    return threadView.contentY - threadView.originY + threadView.height >= threadView.contentHeight - Style.space(48)
+  }
+
+  function updateThreadModel() {
+    var follow = root.followNextMessage || root.autoFollowThread
+    var anchorId = ""
+    var anchorOffset = 0
+    if (!follow) {
+      var visibleIndex = threadView.indexAt(threadView.width / 2, threadView.contentY + 1)
+      var visibleItem = threadView.itemAtIndex(visibleIndex)
+      if (visibleItem && visibleIndex >= 0) {
+        anchorId = String(threadModel.get(visibleIndex).entry.id)
+        anchorOffset = threadView.contentY - visibleItem.y
+      }
+    }
+    Store.syncListModel(threadModel, imsg ? imsg.messages : [])
+    threadView.forceLayout()
+    if (follow) {
+      threadView.positionViewAtEnd()
+      root.followNextMessage = false
+    } else if (anchorId !== "") {
+      for (var i = 0; i < threadModel.count; i++) {
+        if (String(threadModel.get(i).entry.id) !== anchorId) continue
+        threadView.positionViewAtIndex(i, ListView.Beginning)
+        threadView.forceLayout()
+        var anchor = threadView.itemAtIndex(i)
+        if (anchor) threadView.contentY = anchor.y + anchorOffset
+        break
+      }
+    }
+  }
+
+  ListModel {
+    id: threadModel
+    dynamicRoles: true
+  }
+
+  Connections {
+    target: root.imsg
+    function onMessagesChanged() { root.updateThreadModel() }
+    function onFrameMetricRequested(metric, startedAt) {
+      if (root.opened && root.pendingFrameMetrics.length < 256) {
+        root.pendingFrameMetrics = root.pendingFrameMetrics.concat([{ metric: metric, startedAt: startedAt }])
+      }
+    }
+    function onDatabaseReset() {
+      root.selectedChatId = 0
+      root.imsg.openChatId = 0
+      root.draftsByChat = ({})
+    }
+  }
+
+  Connections {
+    target: threadView.Window.window
+    function onFrameSwapped() {
+      var samples = root.pendingFrameMetrics
+      root.pendingFrameMetrics = []
+      if (!root.opened || !root.imsg) return
+      for (var i = 0; i < samples.length; i++) {
+        root.imsg.recordWallMetric(samples[i].metric, samples[i].startedAt)
+      }
+    }
+  }
+
+  onImsgChanged: Qt.callLater(root.updateThreadModel)
 
   function call(method, args) {
     if (method === "openChat" && args && args.chat_id) {
@@ -302,12 +392,12 @@ Panel {
             anchors.right: parent.right
             anchors.bottom: composerRow.top
             anchors.bottomMargin: Style.space(8)
-            model: imsg ? imsg.messages : []
+            model: threadModel
             clip: true
             spacing: Style.space(4)
             boundsBehavior: Flickable.StopAtBounds
-
-            onCountChanged: if (count > 0) positionViewAtEnd()
+            onMovementStarted: root.autoFollowThread = false
+            onMovementEnded: root.autoFollowThread = root.nearThreadBottom()
 
             header: Item {
               width: threadView.width
@@ -320,12 +410,17 @@ Panel {
                 onPressed: function() {
                   if (!imsg || imsg.messages.length === 0) return
                   var oldest = imsg.messages[0]
-                  if (oldest && oldest.created_at) imsg.loadMessages(selectedChatId, oldest.created_at)
+                  if (oldest && oldest.created_at) {
+                    root.autoFollowThread = false
+                    imsg.loadMessages(selectedChatId, oldest.created_at)
+                  }
                 }
               }
             }
 
             delegate: Item {
+              required property var entry
+              readonly property var modelData: entry
               visible: Models.messageText(modelData).length > 0
               width: ListView.view ? ListView.view.width : 0
               height: visible ? bubble.height + Style.space(4) : 0
@@ -336,7 +431,7 @@ Panel {
                 anchors.left: fromMe ? undefined : parent.left
                 anchors.right: fromMe ? parent.right : undefined
                 width: Math.round(parent.width * 0.78)
-                height: bubbleText.implicitHeight + Style.space(16)
+                height: bubbleText.implicitHeight + deliveryRow.height + Style.space(16)
                 radius: 8
                 color: fromMe ? Qt.rgba(0.2, 0.5, 1, 0.35) : Qt.rgba(0, 0, 0, 0.08)
                 border.width: fromMe ? 0 : 1
@@ -352,6 +447,40 @@ Panel {
                   text: Models.messageText(modelData)
                   color: root.barForeground
                   font.pixelSize: Style.font.body
+                }
+
+                Column {
+                  id: deliveryRow
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.bottom: parent.bottom
+                  anchors.margins: Style.space(6)
+                  height: modelData.local_pending ? implicitHeight : 0
+                  visible: height > 0
+                  spacing: Style.space(6)
+
+                  Text {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    text: modelData.delivery_status === "failed" ? (modelData.delivery_error || "Send failed")
+                      : modelData.delivery_status === "unconfirmed" ? (modelData.delivery_error || "Send not confirmed")
+                      : modelData.delivery_status === "queued" ? "Queued"
+                      : modelData.delivery_status === "sent" ? "Sent" : "Sending…"
+                    color: modelData.delivery_status === "failed" || modelData.delivery_status === "unconfirmed" ? "#ff6b6b" : root.barForeground
+                    opacity: 0.72
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    visible: modelData.retry_allowed !== false && (modelData.delivery_status === "failed" || modelData.delivery_status === "unconfirmed")
+                    text: modelData.delivery_status === "unconfirmed" ? "Retry (may duplicate)" : "Retry"
+                    color: root.barForeground
+                    font.bold: true
+                    font.pixelSize: Style.font.caption
+                    MouseArea {
+                      anchors.fill: parent
+                      onClicked: imsg.retryMessage(modelData.client_id)
+                    }
+                  }
                 }
               }
             }
@@ -395,7 +524,7 @@ Panel {
                 font.pixelSize: Style.font.body
                 clip: true
                 selectByMouse: true
-                enabled: selectedChatId > 0 && imsg && !imsg.sending
+                enabled: selectedChatId > 0 && imsg
                 Keys.onReturnPressed: function(event) {
                   if (!(event.modifiers & Qt.ShiftModifier)) {
                     event.accepted = true
@@ -408,8 +537,8 @@ Panel {
             WidgetButton {
               id: sendBtn
               bar: root.bar
-              text: imsg && imsg.sending ? "…" : "Send"
-              enabled: selectedChatId > 0 && imsg && !imsg.sending && root.draftText.trim().length > 0
+              text: "Send"
+              enabled: selectedChatId > 0 && imsg && root.draftText.trim().length > 0
               onPressed: function() { root.sendDraft() }
             }
           }

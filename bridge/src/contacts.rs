@@ -323,7 +323,7 @@ async fn authorize_inner(config: &Config, rpc: &Arc<ImsgRpc>) -> Result<Contacts
             Step::RestartRpc => {
                 info!("contacts grant landed without names; respawning imsg rpc");
                 restarted = true;
-                if let Err(e) = rpc.respawn(&config.imsg_path).await {
+                if let Err(e) = rpc.respawn().await {
                     warn!("imsg rpc respawn: {e}");
                     Step::Done(ContactsOutcome::HelperMissing {
                         detail: format!("respawn failed: {e}"),

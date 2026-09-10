@@ -9,9 +9,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{
@@ -25,6 +25,9 @@ type WsRead = SplitStream<WsStream>;
 static REQ_ID: AtomicU64 = AtomicU64::new(1);
 
 const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const INBOUND_DEADLINE: Duration = Duration::from_secs(30);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Owns the WSS to the Mac. Demultiplexes inbound frames: `res` routed by id to
 /// the waiting caller, `event` routed to the session's event channel.
@@ -32,6 +35,7 @@ pub struct Uplink {
     write: Mutex<WsSink>,
     pending: Mutex<HashMap<String, oneshot::Sender<Result<Value, ErrorBody>>>>,
     events: mpsc::Sender<BridgeEvent>,
+    shutdown: Notify,
 }
 
 /// What `connect` hands back: the call surface, the event stream, and the pump
@@ -64,7 +68,7 @@ impl UplinkError {
             Self::LinkDown => "link_down",
             Self::Timeout { .. } => "timeout",
             Self::Upstream(_) => "upstream",
-            Self::Transport(_) => "error",
+            Self::Transport(_) => "transport",
         }
     }
 }
@@ -144,6 +148,7 @@ impl Uplink {
             write: Mutex::new(write),
             pending: Mutex::new(HashMap::new()),
             events: evt_tx,
+            shutdown: Notify::new(),
         });
         let pump_uplink = Arc::clone(&uplink);
         let pump = tokio::spawn(async move { pump_uplink.pump(read).await });
@@ -175,13 +180,9 @@ impl Uplink {
             params,
         };
         let line = req.to_line().map_err(anyhow::Error::from)?;
-        let send = {
-            let mut write = self.write.lock().await;
-            write.send(Message::Text(line.into())).await
-        };
-        if let Err(e) = send {
+        if let Err(error) = self.write_line(line).await {
             self.pending.lock().await.remove(&id);
-            return Err(UplinkError::Transport(e.into()));
+            return Err(UplinkError::Transport(error));
         }
 
         match tokio::time::timeout(timeout, rx).await {
@@ -212,8 +213,28 @@ impl Uplink {
     }
 
     async fn read_loop(&self, read: &mut WsRead) -> Result<()> {
-        while let Some(msg) = read.next().await {
-            let msg = msg?;
+        let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_inbound = tokio::time::Instant::now();
+        loop {
+            let msg = tokio::select! {
+                _ = self.shutdown.notified() => {
+                    anyhow::bail!("bridge write failed");
+                }
+                msg = read.next() => {
+                    let Some(msg) = msg else { break };
+                    last_inbound = tokio::time::Instant::now();
+                    msg?
+                }
+                _ = heartbeat.tick() => {
+                    if last_inbound.elapsed() >= INBOUND_DEADLINE {
+                        anyhow::bail!("bridge heartbeat deadline exceeded");
+                    }
+                    let line = Envelope::Ping.to_line()?;
+                    self.write_line(line).await?;
+                    continue;
+                }
+            };
             match msg {
                 Message::Text(text) => {
                     let Ok(env) = Envelope::parse_line(&text) else {
@@ -226,14 +247,25 @@ impl Uplink {
                             }
                         }
                         RoutedFrame::Event(evt) => {
-                            if self.events.send(evt).await.is_err() {
-                                break;
+                            let started = Instant::now();
+                            match self.events.try_send(evt) {
+                                Ok(()) => tracing::debug!(
+                                    metric = "event_forward",
+                                    elapsed_ms = started.elapsed().as_millis() as u64,
+                                    request_id = "bridge_event",
+                                    "realtime latency"
+                                ),
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    anyhow::bail!(
+                                        "bridge event queue full; reconnect for recovery"
+                                    );
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => break,
                             }
                         }
                         RoutedFrame::Ping => {
                             let line = Envelope::Pong.to_line()?;
-                            let mut write = self.write.lock().await;
-                            write.send(Message::Text(line.into())).await?;
+                            self.write_line(line).await?;
                         }
                         RoutedFrame::Ignore => {}
                     }
@@ -243,6 +275,28 @@ impl Uplink {
             }
         }
         Ok(())
+    }
+
+    async fn write_line(&self, line: String) -> Result<()> {
+        match tokio::time::timeout(WRITE_TIMEOUT, async {
+            self.write
+                .lock()
+                .await
+                .send(Message::Text(line.into()))
+                .await
+        })
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => {
+                self.shutdown.notify_one();
+                Err(error.into())
+            }
+            Err(_) => {
+                self.shutdown.notify_one();
+                anyhow::bail!("bridge write timed out")
+            }
+        }
     }
 }
 
@@ -293,8 +347,11 @@ fn build_tls(config: &SyncConfig) -> Result<ClientConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::future;
     use imsg_proto::event::BridgeEvent;
     use serde_json::json;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{accept_async, connect_async};
 
     #[tokio::test]
     async fn event_arriving_while_call_pending_is_forwarded_and_matching_res_still_resolves() {
@@ -354,6 +411,29 @@ mod tests {
     }
 
     #[test]
+    fn socket_error_codes_match_the_plugin_classifier() {
+        assert_eq!(
+            UplinkError::Transport(anyhow::anyhow!("write failed")).code(),
+            "transport"
+        );
+        assert_eq!(
+            UplinkError::Upstream(ErrorBody {
+                code: "denied".into(),
+                message: "no".into(),
+            })
+            .code(),
+            "upstream"
+        );
+        assert_eq!(
+            UplinkError::Timeout {
+                method: "send".into()
+            }
+            .code(),
+            "timeout"
+        );
+    }
+
+    #[test]
     fn route_frame_classifies_res_error_and_unknown_event() {
         match route_frame(Envelope::Res {
             id: "7".into(),
@@ -381,5 +461,33 @@ mod tests {
             }
             other => panic!("expected unknown event, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn silent_peer_expires_the_live_socket_pump() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _socket = accept_async(stream).await.unwrap();
+            future::pending::<()>().await;
+        });
+        let (socket, _) = connect_async(format!("ws://{addr}")).await.unwrap();
+        let (write, mut read) = socket.split();
+        let (events, _event_rx) = mpsc::channel(8);
+        let uplink = Arc::new(Uplink {
+            write: Mutex::new(write),
+            pending: Mutex::new(HashMap::new()),
+            events,
+            shutdown: Notify::new(),
+        });
+
+        tokio::time::pause();
+        let pump = tokio::spawn(async move { uplink.read_loop(&mut read).await });
+        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::task::yield_now().await;
+        let error = pump.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("heartbeat deadline"));
+        server.abort();
     }
 }

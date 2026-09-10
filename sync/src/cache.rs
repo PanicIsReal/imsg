@@ -258,11 +258,13 @@ impl MessageCache {
             .get_meta("contacts")
             .await?
             .unwrap_or_else(|| "unknown".into());
+        let db_generation = self.get_meta("db_generation").await?.unwrap_or_default();
         Ok(serde_json::json!({
             "bridge_connected": bridge_connected,
             "database_ready": database_ready,
             "last_error": last_error,
             "contacts": contacts,
+            "db_generation": db_generation,
         }))
     }
 
@@ -278,6 +280,16 @@ impl MessageCache {
             .fetch_one(&self.pool)
             .await?;
         Ok(row.get("c"))
+    }
+
+    pub async fn clear_content(&self) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM messages")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM chats").execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     pub fn pool(&self) -> &SqlitePool {
@@ -384,6 +396,25 @@ mod tests {
         cache.upsert_chat(&chat).await.unwrap();
         let chats = cache.list_chats(10).await.unwrap();
         assert_eq!(chats.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn clear_content_removes_old_generation_rows() {
+        let dir = tempdir().unwrap();
+        let cache = MessageCache::open(&dir.path().join("cache.db"))
+            .await
+            .unwrap();
+        cache
+            .upsert_chat(&serde_json::json!({"id": 1, "name": "Old"}))
+            .await
+            .unwrap();
+        cache
+            .apply_live_message(&serde_json::json!({"id": 2, "chat_id": 1}))
+            .await
+            .unwrap();
+        cache.clear_content().await.unwrap();
+        assert_eq!(cache.chat_count().await.unwrap(), 0);
+        assert_eq!(cache.message_count().await.unwrap(), 0);
     }
 
     #[tokio::test]

@@ -5,14 +5,26 @@ use imsg_proto::Envelope;
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
 use tracing::info;
 
 enum ClientMode {
     Oneshot,
     Streaming(broadcast::Receiver<Envelope>),
+}
+
+const CLIENT_OUTPUT_CAPACITY: usize = 64;
+const CLIENT_REQUEST_LIMIT: usize = 16;
+
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 pub async fn serve(
@@ -49,9 +61,22 @@ async fn handle_client(
     uplink: UplinkHandle,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
-    let writer = Arc::new(Mutex::new(writer));
+    let (output_tx, mut output_rx) = mpsc::channel::<Envelope>(CLIENT_OUTPUT_CAPACITY);
+    let mut writer_task = tokio::spawn(async move {
+        let mut writer = writer;
+        while let Some(env) = output_rx.recv().await {
+            writer
+                .write_all(format!("{}\n", env.to_line()?).as_bytes())
+                .await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    let _writer_guard = AbortOnDrop(writer_task.abort_handle());
+    let request_slots = Arc::new(Semaphore::new(CLIENT_REQUEST_LIMIT));
+    let mut requests = tokio::task::JoinSet::new();
     let mut lines = BufReader::new(reader).lines();
     let mut mode = ClientMode::Oneshot;
+    let mut resync_needed = false;
 
     loop {
         match &mut mode {
@@ -59,24 +84,25 @@ async fn handle_client(
                 tokio::select! {
                     line = lines.next_line() => {
                         let Some(line) = line? else { break };
-                        process_line(&line, &cache, &events, &uplink, &writer).await?;
+                        spawn_request(&line, &cache, &events, &uplink, &output_tx, &request_slots, &mut requests)?;
                     }
                     evt = rx.recv() => {
                         match evt {
-                            Ok(env) => write_env(&writer, &env).await?,
+                            Ok(env) => {
+                                if output_tx.try_send(env).is_err() {
+                                    resync_needed = true;
+                                }
+                            }
                             Err(broadcast::error::RecvError::Lagged(_)) => {
-                                let chats = cache.read().await.list_chats(50).await?;
-                                write_env(
-                                    &writer,
-                                    &Envelope::Event {
-                                        topic: "sync.chats".into(),
-                                        payload: json!({"reason": "events_lagged", "chats": chats}),
-                                    },
-                                )
-                                .await?;
+                                resync_needed = true;
                             }
                             Err(broadcast::error::RecvError::Closed) => break,
                         }
+                    }
+                    Some(result) = requests.join_next(), if !requests.is_empty() => result??,
+                    permit = output_tx.reserve(), if resync_needed => {
+                        permit?.send(local_resync(&cache, "events_lagged").await?);
+                        resync_needed = false;
                     }
                 }
             }
@@ -89,13 +115,34 @@ async fn handle_client(
                     let snap = snapshot(&cache).await?;
                     let env = Envelope::parse_line(line.trim())?;
                     if let Envelope::Req { id, .. } = env {
-                        write_env(&writer, &ok_res(&id, snap)).await?;
+                        output_tx.send(ok_res(&id, snap)).await?;
                     }
                 } else {
-                    process_line(&line, &cache, &events, &uplink, &writer).await?;
+                    spawn_request(
+                        &line,
+                        &cache,
+                        &events,
+                        &uplink,
+                        &output_tx,
+                        &request_slots,
+                        &mut requests,
+                    )?;
+                    if let Some(result) = requests.join_next().await {
+                        result??;
+                    }
                 }
             }
         }
+    }
+    requests.abort_all();
+    while requests.join_next().await.is_some() {}
+    drop(output_tx);
+    if tokio::time::timeout(std::time::Duration::from_secs(1), &mut writer_task)
+        .await
+        .is_err()
+    {
+        writer_task.abort();
+        let _ = writer_task.await;
     }
     Ok(())
 }
@@ -111,12 +158,14 @@ fn subscribe_requested(line: &str) -> Result<bool> {
     }
 }
 
-async fn process_line(
+fn spawn_request(
     line: &str,
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
     uplink: &UplinkHandle,
-    writer: &Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    output: &mpsc::Sender<Envelope>,
+    slots: &Arc<Semaphore>,
+    requests: &mut tokio::task::JoinSet<Result<()>>,
 ) -> Result<()> {
     let line = line.trim();
     if line.is_empty() {
@@ -124,33 +173,56 @@ async fn process_line(
     }
     let env = Envelope::parse_line(line)?;
     if let Envelope::Req { id, method, params } = env {
-        if method == "events.subscribe" {
-            let snap = snapshot(cache).await?;
-            write_env(writer, &ok_res(&id, snap)).await?;
-            return Ok(());
-        }
-        let result = dispatch(cache, events, uplink, &method, params).await;
-        let reply = match result {
-            Ok(v) => ok_res(&id, v),
-            Err(e) => {
-                let code = e
-                    .downcast_ref::<UplinkError>()
-                    .map(UplinkError::code)
-                    .unwrap_or("error");
-                Envelope::Res {
+        let permit = match Arc::clone(slots).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let _ = output.try_send(Envelope::Res {
                     id,
                     ok: false,
                     result: None,
                     error: Some(imsg_proto::ErrorBody {
-                        code: code.into(),
-                        message: e.to_string(),
+                        code: "busy".into(),
+                        message: "too many in-flight client requests".into(),
                     }),
-                }
+                });
+                return Ok(());
             }
         };
-        write_env(writer, &reply).await?;
+        let cache = Arc::clone(cache);
+        let events = events.clone();
+        let uplink = uplink.clone();
+        let output = output.clone();
+        requests.spawn(async move {
+            let _permit = permit;
+            let result = if method == "events.subscribe" {
+                snapshot(&cache).await
+            } else {
+                dispatch(&cache, &events, &uplink, &id, &method, params).await
+            };
+            let reply = match result {
+                Ok(v) => ok_res(&id, v),
+                Err(e) => error_res(id, e),
+            };
+            output.send(reply).await.context("client output closed")
+        });
     }
     Ok(())
+}
+
+fn error_res(id: String, error: anyhow::Error) -> Envelope {
+    let code = error
+        .downcast_ref::<UplinkError>()
+        .map(UplinkError::code)
+        .unwrap_or("error");
+    Envelope::Res {
+        id,
+        ok: false,
+        result: None,
+        error: Some(imsg_proto::ErrorBody {
+            code: code.into(),
+            message: error.to_string(),
+        }),
+    }
 }
 
 fn ok_res(id: &str, result: Value) -> Envelope {
@@ -162,16 +234,6 @@ fn ok_res(id: &str, result: Value) -> Envelope {
     }
 }
 
-async fn write_env(
-    writer: &Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
-    env: &Envelope,
-) -> Result<()> {
-    let mut w = writer.lock().await;
-    w.write_all(format!("{}\n", env.to_line()?).as_bytes())
-        .await?;
-    Ok(())
-}
-
 async fn snapshot(cache: &Arc<RwLock<MessageCache>>) -> Result<Value> {
     let guard = cache.read().await;
     let chats = guard.list_chats(50).await?;
@@ -181,6 +243,16 @@ async fn snapshot(cache: &Arc<RwLock<MessageCache>>) -> Result<Value> {
         obj.insert("protocol".into(), json!(imsg_proto::PROTOCOL_VERSION));
     }
     Ok(snap)
+}
+
+async fn local_resync(cache: &Arc<RwLock<MessageCache>>, reason: &str) -> Result<Envelope> {
+    let guard = cache.read().await;
+    let chats = guard.list_chats(50).await?;
+    let generation = guard.get_meta("db_generation").await?.unwrap_or_default();
+    Ok(Envelope::Event {
+        topic: "sync.resync".into(),
+        payload: json!({"reason": reason, "chats": chats, "db_generation": generation}),
+    })
 }
 
 fn live_event(applied: crate::cache::Applied) -> Envelope {
@@ -202,10 +274,17 @@ async fn dispatch(
     cache: &Arc<RwLock<MessageCache>>,
     events: &broadcast::Sender<Envelope>,
     uplink: &UplinkHandle,
+    request_id: &str,
     method: &str,
     params: Value,
 ) -> Result<Value> {
     match method {
+        #[cfg(test)]
+        "test.sleep" => {
+            let millis = params.get("millis").and_then(Value::as_u64).unwrap_or(0);
+            tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
+            Ok(json!({"slept_ms": millis}))
+        }
         "status" => {
             let guard = cache.read().await;
             let mut snap = guard.link_snapshot().await?;
@@ -225,9 +304,21 @@ async fn dispatch(
         "messages.send" => {
             let chat_id = params["chat_id"].as_i64().context("chat_id required")?;
             let text = params["text"].as_str().context("text required")?;
+            let generation = cache.read().await.get_meta("db_generation").await?;
+            let client_id = params
+                .get("client_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let started = Instant::now();
             let result = uplink
                 .call("send", json!({"chat_id": chat_id, "text": text}))
                 .await?;
+            tracing::debug!(
+                metric = "send_roundtrip",
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                request_id = %request_id,
+                "realtime latency"
+            );
             let applied = {
                 let mut msg = if let Some(inner) = result.get("message") {
                     inner.clone()
@@ -237,6 +328,9 @@ async fn dispatch(
                     Value::Null
                 };
                 if msg.is_object() {
+                    if let Some(client_id) = &client_id {
+                        msg["client_id"] = json!(client_id);
+                    }
                     if msg.get("chat_id").and_then(|v| v.as_i64()).unwrap_or(0) == 0 {
                         msg["chat_id"] = json!(chat_id);
                     }
@@ -247,6 +341,9 @@ async fn dispatch(
                         msg["text"] = json!(text);
                     }
                     let guard = cache.write().await;
+                    if guard.get_meta("db_generation").await? != generation {
+                        anyhow::bail!("send outcome unconfirmed after database generation changed");
+                    }
                     Some(guard.apply_live_message(&msg).await?)
                 } else {
                     None
@@ -255,7 +352,7 @@ async fn dispatch(
             if let Some(applied) = applied {
                 let _ = events.send(live_event(applied));
             }
-            Ok(json!({"ok": true, "message": result}))
+            Ok(json!({"ok": true, "message": result, "client_id": client_id}))
         }
         "chats.list" => {
             let guard = cache.read().await;
@@ -336,8 +433,12 @@ mod tests {
     }
 
     async fn write_req(stream: &mut UnixStream, method: &str, params: Value) {
+        write_req_with_id(stream, "1", method, params).await;
+    }
+
+    async fn write_req_with_id(stream: &mut UnixStream, id: &str, method: &str, params: Value) {
         let req = Envelope::Req {
-            id: "1".into(),
+            id: id.into(),
             method: method.into(),
             params,
         };
@@ -463,5 +564,77 @@ mod tests {
             }
             other => panic!("expected link_down, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn half_closed_oneshot_still_receives_its_response() {
+        let (_dir, sock, _events) = boot().await;
+        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        write_req(&mut stream, "status", json!({})).await;
+        stream.shutdown().await.unwrap();
+        let line = timeout(
+            Duration::from_secs(1),
+            BufReader::new(stream).lines().next_line(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            Envelope::parse_line(&line).unwrap(),
+            Envelope::Res { ok: true, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn slow_streaming_request_does_not_block_events_or_later_requests() {
+        let (_dir, sock, events) = boot().await;
+        let mut stream = UnixStream::connect(&sock).await.unwrap();
+        write_req(&mut stream, "events.subscribe", json!({})).await;
+        let mut lines = BufReader::new(stream).lines();
+        lines.next_line().await.unwrap().unwrap();
+
+        let stream = lines.get_mut().get_mut();
+        write_req_with_id(stream, "slow", "test.sleep", json!({"millis": 300})).await;
+        write_req_with_id(stream, "fast", "status", json!({})).await;
+        let _ = events.send(Envelope::Event {
+            topic: "sync.message".into(),
+            payload: json!({"message": {"id": 7}}),
+        });
+
+        for _ in 0..2 {
+            let line = timeout(Duration::from_millis(150), lines.next_line())
+                .await
+                .expect("event and fast response must beat the slow request")
+                .unwrap()
+                .unwrap();
+            match Envelope::parse_line(&line).unwrap() {
+                Envelope::Res { id, .. } => assert_ne!(id, "slow"),
+                Envelope::Event { topic, .. } => assert_eq!(topic, "sync.message"),
+                other => panic!("unexpected envelope {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn lag_recovery_event_names_reason_and_includes_chats() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = MessageCache::open(&dir.path().join("cache.db"))
+            .await
+            .unwrap();
+        cache
+            .upsert_chat(&json!({"id": 1, "last_message_at": "2026-01-01T00:00:00Z"}))
+            .await
+            .unwrap();
+        let env = local_resync(&Arc::new(RwLock::new(cache)), "events_lagged")
+            .await
+            .unwrap();
+        let Envelope::Event { topic, payload } = env else {
+            panic!("expected event");
+        };
+        assert_eq!(topic, "sync.resync");
+        assert_eq!(payload["reason"], "events_lagged");
+        assert_eq!(payload["chats"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["db_generation"], "");
     }
 }

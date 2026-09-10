@@ -1,16 +1,7 @@
 use crate::SyncCommands;
 use anyhow::Result;
-use imsg_sync::install_crypto_provider;
-use tracing_subscriber::EnvFilter;
 
 pub async fn run(command: SyncCommands, json: bool) -> Result<()> {
-    install_crypto_provider();
-    if !json {
-        tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env().add_directive("imsg_sync=info".parse()?))
-            .init();
-    }
-
     match command {
         SyncCommands::Run => imsg_sync::commands::run_daemon().await,
         SyncCommands::Status => {

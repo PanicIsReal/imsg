@@ -10,7 +10,14 @@ pub mod steipete;
 pub mod tls;
 
 pub fn install_crypto_provider() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("failed to install rustls ring crypto provider");
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn install_crypto_provider_can_run_twice() {
+        super::install_crypto_provider();
+        super::install_crypto_provider();
+    }
 }
